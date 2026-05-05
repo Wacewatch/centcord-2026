@@ -30,6 +30,38 @@ export default function SettingsPage() {
   });
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [activity, setActivity] = useState({
+    activity_type: user?.activity_type || "",
+    activity_text: user?.activity_text || "",
+    activity_emoji: user?.activity_emoji || "",
+  });
+  const [savingActivity, setSavingActivity] = useState(false);
+
+  const saveActivity = async () => {
+    setSavingActivity(true);
+    try {
+      const payload = {
+        activity_type: activity.activity_type || null,
+        activity_text: activity.activity_text || null,
+        activity_emoji: activity.activity_emoji || null,
+      };
+      await api.patch("/users/me/activity", payload);
+      await refreshUser();
+      toast.success("Activité mise à jour");
+    } catch (_) { toast.error("Échec"); }
+    finally { setSavingActivity(false); }
+  };
+
+  const clearActivity = async () => {
+    setSavingActivity(true);
+    try {
+      await api.patch("/users/me/activity", {});
+      setActivity({ activity_type: "", activity_text: "", activity_emoji: "" });
+      await refreshUser();
+      toast.success("Activité effacée");
+    } catch (_) { toast.error("Échec"); }
+    finally { setSavingActivity(false); }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -112,6 +144,36 @@ export default function SettingsPage() {
                 <button data-testid="settings-save" onClick={save} disabled={saving} className="bg-cc-accent text-white font-bold uppercase tracking-wide px-6 py-3 cc-brutal-shadow cc-brutal-press disabled:opacity-50">
                   {saving ? "Enregistrement..." : "Enregistrer les modifications"}
                 </button>
+
+                <div className="mt-10 pt-8 border-t border-cc-border">
+                  <h2 className="font-display text-2xl font-extrabold tracking-tighter uppercase mb-4">Activité personnalisée</h2>
+                  <p className="text-cc-subtext text-xs mb-4">Affiche un statut "Joue à...", "Écoute...", etc., visible par tes amis et co-membres.</p>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Type</label>
+                      <select value={activity.activity_type} onChange={(e) => setActivity({ ...activity, activity_type: e.target.value })} className="mt-2 w-full bg-cc-surface1 border border-cc-border focus:border-cc-accent outline-none px-3 py-2.5" data-testid="activity-type">
+                        <option value="">— Aucun —</option>
+                        <option value="playing">Joue à</option>
+                        <option value="listening">Écoute</option>
+                        <option value="watching">Regarde</option>
+                        <option value="streaming">Stream</option>
+                        <option value="custom">Personnalisé</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Émoji</label>
+                      <input value={activity.activity_emoji} onChange={(e) => setActivity({ ...activity, activity_emoji: e.target.value.slice(0, 4) })} placeholder="🎮" className="mt-2 w-full bg-cc-surface1 border border-cc-border focus:border-cc-accent outline-none px-3 py-2.5 text-center" data-testid="activity-emoji" />
+                    </div>
+                    <div className="col-span-3">
+                      <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Texte</label>
+                      <input value={activity.activity_text} onChange={(e) => setActivity({ ...activity, activity_text: e.target.value })} placeholder="Cyberpunk 2077" maxLength={128} className="mt-2 w-full bg-cc-surface1 border border-cc-border focus:border-cc-accent outline-none px-3 py-2.5" data-testid="activity-text" />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 mt-4">
+                    <button onClick={saveActivity} disabled={savingActivity} data-testid="activity-save" className="bg-cc-accent text-white font-bold uppercase tracking-wide px-5 py-2.5 cc-brutal-shadow cc-brutal-press disabled:opacity-50">{savingActivity ? "..." : "Définir"}</button>
+                    <button onClick={clearActivity} className="border border-cc-border text-cc-subtext uppercase tracking-widest font-bold px-5 py-2.5 hover:bg-cc-surface1">Effacer</button>
+                  </div>
+                </div>
               </div>
             </>
           )}

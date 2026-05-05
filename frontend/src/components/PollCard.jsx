@@ -16,7 +16,10 @@ export default function PollCard({ poll: initialPoll }) {
     const off = ws.subscribe("poll.update", (d) => {
       if (d.poll_id === poll.poll_id) setPoll((p) => ({ ...p, options: d.options }));
     });
-    return () => off();
+    const offEnd = ws.subscribe("poll.end", (d) => {
+      if (d.poll_id === poll.poll_id) setPoll((p) => ({ ...p, ended: true }));
+    });
+    return () => { off(); offEnd(); };
   }, [ws, poll?.poll_id]);
 
   if (!poll) return null;
@@ -31,6 +34,17 @@ export default function PollCard({ poll: initialPoll }) {
     try { const { data } = await api.post(`/polls/${poll.poll_id}/vote`, null, { params: { option_id: optId } }); setPoll((p) => ({ ...p, options: data.options })); }
     catch (e) { toast.error(e?.response?.data?.detail || "Vote impossible"); }
   };
+
+  const closePoll = async () => {
+    if (!window.confirm("Clôturer ce sondage ?")) return;
+    try {
+      await api.post(`/polls/${poll.poll_id}/end`);
+      setPoll((p) => ({ ...p, ended: true }));
+      toast.success("Sondage clôturé");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Échec"); }
+  };
+
+  const isAuthor = poll.author_id === user?.user_id;
 
   return (
     <div className="mt-2 border border-cc-border bg-cc-surface1 p-4 max-w-md">
@@ -65,8 +79,11 @@ export default function PollCard({ poll: initialPoll }) {
           );
         })}
       </ul>
-      <div className="text-[10px] text-cc-muted uppercase tracking-widest mt-3">
-        {total} vote{total !== 1 ? "s" : ""}{poll.expires_at && !closed ? ` · Expire ${new Date(poll.expires_at).toLocaleString()}` : ""}
+      <div className="text-[10px] text-cc-muted uppercase tracking-widest mt-3 flex items-center justify-between gap-3">
+        <span>{total} vote{total !== 1 ? "s" : ""}{poll.expires_at && !closed ? ` · Expire ${new Date(poll.expires_at).toLocaleString()}` : ""}</span>
+        {!closed && isAuthor && (
+          <button onClick={closePoll} data-testid={`poll-close-${poll.poll_id}`} className="text-cc-accent hover:text-cc-text font-bold">Clôturer</button>
+        )}
       </div>
     </div>
   );

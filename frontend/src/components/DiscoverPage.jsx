@@ -7,15 +7,26 @@ import { toast } from "sonner";
 
 export default function DiscoverPage({ onJoined }) {
   const [q, setQ] = useState("");
+  const [activeTag, setActiveTag] = useState(null);
   const [servers, setServers] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  const load = async (query = "") => {
+  const load = async (query = "", tag = null) => {
     setLoading(true);
-    try { const { data } = await api.get(`/servers/discover${query ? `?q=${encodeURIComponent(query)}` : ""}`); setServers(data); }
-    catch (_) {} finally { setLoading(false); }
+    try {
+      let url;
+      if (tag) {
+        url = `/servers/discover/by-tag/${encodeURIComponent(tag)}`;
+      } else {
+        url = `/servers/discover${query ? `?q=${encodeURIComponent(query)}` : ""}`;
+      }
+      const { data } = await api.get(url);
+      setServers(data);
+    } catch (_) {} finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
+
+  const popularTags = ["gaming", "fr", "dev", "anime", "music", "art", "tech", "memes"];
 
   const join = async (s) => {
     try {
@@ -29,17 +40,26 @@ export default function DiscoverPage({ onJoined }) {
     <>
       <aside className="w-64 bg-cc-surface1 border-r border-cc-border flex flex-col shrink-0">
         <div className="px-4 h-12 border-b border-cc-border flex items-center font-display font-extrabold uppercase text-sm tracking-tighter">DÉCOUVRIR</div>
+        <div className="p-3">
+          <div className="text-[10px] uppercase tracking-[0.3em] font-bold text-cc-muted mb-2">Tags populaires</div>
+          <div className="flex flex-wrap gap-1">
+            <button onClick={() => { setActiveTag(null); load(q, null); }} className={`text-[10px] uppercase tracking-widest font-bold px-2 py-1 border ${!activeTag ? "border-cc-accent text-cc-accent" : "border-cc-border text-cc-subtext hover:text-cc-text"}`}>Tous</button>
+            {popularTags.map((t) => (
+              <button key={t} onClick={() => { setActiveTag(t); load(q, t); }} data-testid={`tag-${t}`} className={`text-[10px] uppercase tracking-widest font-bold px-2 py-1 border ${activeTag === t ? "border-cc-accent text-cc-accent" : "border-cc-border text-cc-subtext hover:text-cc-text"}`}>#{t}</button>
+            ))}
+          </div>
+        </div>
         <div className="flex-1" />
         <div className="mt-auto"><UserBar /></div>
       </aside>
       <main className="flex-1 flex flex-col bg-cc-surface2 overflow-y-auto">
         <header className="h-12 border-b border-cc-border px-6 flex items-center">
-          <span className="font-display font-bold uppercase tracking-tight">Découverte de serveurs</span>
+          <span className="font-display font-bold uppercase tracking-tight">Découverte de serveurs{activeTag ? ` · #${activeTag}` : ""}</span>
         </header>
         <div className="px-10 py-12">
           <span className="text-xs uppercase tracking-[0.3em] font-bold text-cc-muted"><span className="inline-block w-3 h-3 bg-cc-accent mr-3 align-middle" /> Trouvez votre tribu</span>
           <h1 className="font-display text-5xl font-extrabold tracking-tighter uppercase mt-4">Serveurs publics.</h1>
-          <form onSubmit={(e) => { e.preventDefault(); load(q); }} className="mt-8 flex items-center gap-3 max-w-2xl bg-cc-surface1 border border-cc-border focus-within:border-cc-accent px-4 py-3">
+          <form onSubmit={(e) => { e.preventDefault(); setActiveTag(null); load(q); }} className="mt-8 flex items-center gap-3 max-w-2xl bg-cc-surface1 border border-cc-border focus-within:border-cc-accent px-4 py-3">
             <Search className="w-4 h-4 text-cc-muted" />
             <input data-testid="discover-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Rechercher par nom ou description" className="flex-1 bg-transparent outline-none" />
             <button data-testid="discover-search-submit" className="text-xs uppercase tracking-widest font-bold text-cc-accent">Rechercher</button>
@@ -57,6 +77,11 @@ export default function DiscoverPage({ onJoined }) {
                   </div>
                 </div>
                 <p className="text-sm text-cc-subtext line-clamp-3 flex-1">{s.description || "Aucune description."}</p>
+                {(s.tags || []).length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {s.tags.slice(0, 4).map((t) => <span key={t} className="text-[9px] uppercase tracking-widest text-cc-accent border border-cc-border px-1.5 py-0.5">#{t}</span>)}
+                  </div>
+                )}
                 <button onClick={() => join(s)} data-testid={`discover-join-${s.server_id}`} className="mt-4 bg-cc-accent text-white font-bold uppercase tracking-wide py-2 cc-brutal-shadow cc-brutal-press">Rejoindre</button>
               </div>
             ))}

@@ -43,6 +43,17 @@ APP_NAME = os.environ.get('APP_NAME', 'centcord')
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 EMERGENT_AUTH_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
 
+# ── Storage backend: "auto" (try emergent then local), "emergent", or "local" ──
+STORAGE_BACKEND = os.environ.get('STORAGE_BACKEND', 'auto').lower()
+LOCAL_STORAGE_PATH = Path(os.environ.get('LOCAL_STORAGE_PATH', str(ROOT_DIR / 'uploads')))
+LOCAL_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
+
+# ── Cloudflare Turnstile (anti-bot captcha) ──
+TURNSTILE_SECRET = os.environ.get('TURNSTILE_SECRET', '1x0000000000000000000000000000000AA')  # default: always-pass test key
+TURNSTILE_SITE_KEY = os.environ.get('TURNSTILE_SITE_KEY', '1x00000000000000000000AA')  # default: always-pass test key
+TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+TURNSTILE_ENABLED = os.environ.get('TURNSTILE_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger("centcord")
 
@@ -119,6 +130,9 @@ def public_user(u: dict) -> dict:
         "accent_color": u.get("accent_color", "#FF3B00"),
         "status": u.get("status", "online"),
         "custom_status": u.get("custom_status", ""),
+        "activity_type": u.get("activity_type"),
+        "activity_text": u.get("activity_text"),
+        "activity_emoji": u.get("activity_emoji"),
         "role": u.get("role", "user"),
         "created_at": u.get("created_at"),
         "public_key": u.get("public_key"),
@@ -206,45 +220,90 @@ async def require_membership(server_id: str, user: dict, perm: int = PERM_VIEW) 
         raise HTTPException(status_code=403, detail="Missing permissions")
     return perms
 
-# ========== Object storage ==========
+# ========== Object storage (hybrid: Emergent + local-disk fallback for VPS) ==========
 storage_key: Optional[str] = None
+LOCAL_PREFIX = "local://"
+
+def _safe_path(path: str) -> Path:
+    """Resolve a relative storage path inside LOCAL_STORAGE_PATH (no traversal)."""
+    p = (LOCAL_STORAGE_PATH / path).resolve()
+    if not str(p).startswith(str(LOCAL_STORAGE_PATH.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return p
 
 def init_storage() -> Optional[str]:
     global storage_key
     if storage_key:
         return storage_key
+    if STORAGE_BACKEND == 'local':
+        return None
     if not EMERGENT_LLM_KEY:
-        log.warning("EMERGENT_LLM_KEY missing — object storage disabled")
+        log.warning("EMERGENT_LLM_KEY missing — falling back to local-disk storage")
         return None
     try:
         r = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_LLM_KEY}, timeout=20)
         r.raise_for_status()
         storage_key = r.json().get("storage_key")
-        log.info("Object storage initialized")
+        log.info("Object storage initialized (emergent)")
         return storage_key
     except Exception as e:
-        log.error(f"Storage init failed: {e}")
+        log.warning(f"Emergent storage init failed (falling back to local): {e}")
         return None
 
+def _local_put(path: str, data: bytes, content_type: str) -> dict:
+    p = _safe_path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    # store content-type sidecar
+    (p.parent / (p.name + ".ct")).write_text(content_type or "application/octet-stream", encoding="utf-8")
+    return {"path": path, "size": len(data), "backend": "local"}
+
+def _local_get(path: str):
+    p = _safe_path(path)
+    if not p.exists():
+        raise FileNotFoundError(path)
+    ct_file = p.parent / (p.name + ".ct")
+    ct = ct_file.read_text(encoding="utf-8") if ct_file.exists() else "application/octet-stream"
+    return p.read_bytes(), ct
+
 def storage_put(path: str, data: bytes, content_type: str) -> dict:
-    key = init_storage()
-    if not key:
-        raise HTTPException(status_code=503, detail="Storage unavailable")
-    r = requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data, timeout=60,
-    )
-    r.raise_for_status()
-    return r.json()
+    """Hybrid put: try Emergent first (unless STORAGE_BACKEND=local), fall back to local disk."""
+    if STORAGE_BACKEND != 'local':
+        key = init_storage()
+        if key:
+            try:
+                r = requests.put(
+                    f"{STORAGE_URL}/objects/{path}",
+                    headers={"X-Storage-Key": key, "Content-Type": content_type},
+                    data=data, timeout=60,
+                )
+                r.raise_for_status()
+                out = r.json()
+                out["backend"] = "emergent"
+                return out
+            except Exception as e:
+                log.warning(f"Emergent put failed, fallback to local: {e}")
+    # Local fallback
+    return _local_put(path, data, content_type)
 
 def storage_get(path: str):
+    """Hybrid get: try local first (cheaper), then Emergent."""
+    # Try local first
+    try:
+        return _local_get(path)
+    except FileNotFoundError:
+        pass
+    if STORAGE_BACKEND == 'local':
+        raise HTTPException(status_code=404, detail="File not found")
     key = init_storage()
     if not key:
         raise HTTPException(status_code=503, detail="Storage unavailable")
-    r = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=30)
-    r.raise_for_status()
-    return r.content, r.headers.get("Content-Type", "application/octet-stream")
+    try:
+        r = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=30)
+        r.raise_for_status()
+        return r.content, r.headers.get("Content-Type", "application/octet-stream")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"File not found: {e}")
 
 # ========== Rate limiting (in-memory) ==========
 _rate: Dict[str, List[float]] = {}
@@ -302,6 +361,7 @@ class RegisterIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=200)
     display_name: str = Field(min_length=1, max_length=64)
+    turnstile_token: Optional[str] = None  # Cloudflare Turnstile
 
 class LoginIn(BaseModel):
     email: EmailStr
@@ -424,11 +484,35 @@ async def conditional_credentials(request: Request, call_next):
     return resp
 
 # ========== Auth endpoints ==========
+def verify_turnstile(token: Optional[str], ip: Optional[str] = None) -> bool:
+    """Verify Cloudflare Turnstile token. Returns True if valid (or disabled)."""
+    if not TURNSTILE_ENABLED:
+        return True
+    if not token:
+        return False
+    try:
+        data = {"secret": TURNSTILE_SECRET, "response": token}
+        if ip:
+            data["remoteip"] = ip
+        r = requests.post(TURNSTILE_VERIFY_URL, data=data, timeout=10)
+        r.raise_for_status()
+        result = r.json()
+        if result.get("success"):
+            return True
+        log.warning(f"Turnstile failed: {result.get('error-codes')}")
+        return False
+    except Exception as e:
+        log.error(f"Turnstile verify error: {e}")
+        # On verification error, fail-safe: deny
+        return False
+
 @api.post("/auth/register")
 async def auth_register(payload: RegisterIn, request: Request, response: Response):
     ip = request.client.host if request.client else "?"
     if not rate_limit(f"register:{ip}", 10, 600):
         raise HTTPException(status_code=429, detail="Too many requests")
+    if not verify_turnstile(payload.turnstile_token, ip):
+        raise HTTPException(status_code=400, detail="Captcha invalide ou expiré")
     email = payload.email.lower().strip()
     existing = await db.users.find_one({"email": email}, {"_id": 0, "user_id": 1})
     if existing:
@@ -1716,6 +1800,385 @@ async def unmute_member(server_id: str, target_id: str, user: dict = Depends(get
     )
     return {"ok": True}
 
+# ========== Cloudflare Turnstile config endpoint ==========
+@api.get("/auth/captcha/config")
+async def turnstile_config():
+    """Returns the public Turnstile site key for the frontend widget."""
+    return {"site_key": TURNSTILE_SITE_KEY, "enabled": TURNSTILE_ENABLED}
+
+
+# ========== 1. SERVER INVITE CODE REGENERATION ==========
+@api.post("/servers/{server_id}/invite/regen")
+async def regen_invite_code(server_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    new_code = secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:10]
+    await db.servers.update_one({"server_id": server_id}, {"$set": {"invite_code": new_code}})
+    await hub.broadcast_server(server_id, "server.update", {"server_id": server_id, "invite_code": new_code})
+    return {"invite_code": new_code}
+
+
+# ========== 2. CATEGORY UPDATE ==========
+class UpdateCategoryIn(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=64)
+    position: Optional[int] = Field(None, ge=0)
+
+@api.patch("/servers/{server_id}/categories/{category_id}")
+async def update_category(server_id: str, category_id: str, payload: UpdateCategoryIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_CHANNELS)
+    update = {k: (v.upper() if k == "name" and isinstance(v, str) else v)
+              for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    if update:
+        await db.categories.update_one({"category_id": category_id, "server_id": server_id}, {"$set": update})
+        await hub.broadcast_server(server_id, "category.update", {"category_id": category_id, **update})
+    return await db.categories.find_one({"category_id": category_id}, {"_id": 0})
+
+
+# ========== 3. CHANNEL READ MARKERS / UNREAD COUNTS ==========
+class ChannelReadIn(BaseModel):
+    last_read_message_id: Optional[str] = None
+
+@api.post("/channels/{channel_id}/read")
+async def mark_channel_read(channel_id: str, payload: ChannelReadIn, user: dict = Depends(get_current_user)):
+    """Save the last-read message_id for this user in this channel."""
+    last_id = payload.last_read_message_id
+    if not last_id:
+        # use latest message
+        latest = await db.messages.find_one({"channel_id": channel_id, "deleted": {"$ne": True}}, {"_id": 0, "message_id": 1}, sort=[("created_at", -1)])
+        last_id = latest["message_id"] if latest else None
+    if not last_id:
+        return {"ok": True}
+    await db.read_markers.update_one(
+        {"user_id": user["user_id"], "channel_id": channel_id},
+        {"$set": {"user_id": user["user_id"], "channel_id": channel_id,
+                  "last_read_message_id": last_id, "updated_at": now_iso()}},
+        upsert=True
+    )
+    return {"ok": True, "last_read_message_id": last_id}
+
+@api.get("/channels/unread")
+async def list_unread(user: dict = Depends(get_current_user)):
+    """Returns {channel_id: unread_count} for all channels the user can see."""
+    members = await db.members.find({"user_id": user["user_id"]}, {"_id": 0, "server_id": 1}).to_list(500)
+    server_ids = [m["server_id"] for m in members]
+    if not server_ids:
+        return {}
+    channels = await db.channels.find({"server_id": {"$in": server_ids}}, {"_id": 0, "channel_id": 1}).to_list(2000)
+    markers = await db.read_markers.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(2000)
+    marker_map = {m["channel_id"]: m.get("last_read_message_id") for m in markers}
+    out = {}
+    for ch in channels:
+        cid = ch["channel_id"]
+        last_id = marker_map.get(cid)
+        if last_id:
+            last_msg = await db.messages.find_one({"message_id": last_id}, {"_id": 0, "created_at": 1})
+            cutoff = last_msg["created_at"] if last_msg else None
+            q = {"channel_id": cid, "deleted": {"$ne": True}, "author_id": {"$ne": user["user_id"]}}
+            if cutoff:
+                q["created_at"] = {"$gt": cutoff}
+            count = await db.messages.count_documents(q)
+        else:
+            count = await db.messages.count_documents({"channel_id": cid, "deleted": {"$ne": True}, "author_id": {"$ne": user["user_id"]}})
+        if count > 0:
+            out[cid] = count
+    return out
+
+
+# ========== 4. SERVER STATS ==========
+@api.get("/servers/{server_id}/stats")
+async def server_stats(server_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user)
+    member_count = await db.members.count_documents({"server_id": server_id})
+    message_count = await db.messages.count_documents({"server_id": server_id, "deleted": {"$ne": True}})
+    channel_count = await db.channels.count_documents({"server_id": server_id})
+    role_count = await db.roles.count_documents({"server_id": server_id})
+    boost_count = await db.boosts.count_documents({"server_id": server_id})
+    # Online members
+    members = await db.members.find({"server_id": server_id}, {"_id": 0, "user_id": 1}).to_list(2000)
+    user_ids = [m["user_id"] for m in members]
+    online_count = await db.users.count_documents({"user_id": {"$in": user_ids}, "status": {"$in": ["online", "idle", "dnd"]}})
+    # Messages last 7 days
+    cutoff_7d = (now_utc() - timedelta(days=7)).isoformat()
+    messages_7d = await db.messages.count_documents({"server_id": server_id, "created_at": {"$gte": cutoff_7d}, "deleted": {"$ne": True}})
+    return {
+        "server_id": server_id,
+        "member_count": member_count,
+        "online_count": online_count,
+        "message_count": message_count,
+        "messages_7d": messages_7d,
+        "channel_count": channel_count,
+        "role_count": role_count,
+        "boost_count": boost_count,
+    }
+
+
+# ========== 5. USER ACTIVITY (Playing / Listening / Watching) ==========
+class UserActivityIn(BaseModel):
+    activity_type: Optional[str] = Field(None, pattern="^(playing|listening|watching|streaming|custom)$")
+    activity_text: Optional[str] = Field(None, max_length=128)
+    activity_emoji: Optional[str] = Field(None, max_length=8)
+
+@api.patch("/users/me/activity")
+async def update_activity(payload: UserActivityIn, user: dict = Depends(get_current_user)):
+    update = {k: v for k, v in payload.model_dump(exclude_unset=True).items()}
+    # If all empty, clear
+    if all(v in (None, "") for v in update.values()):
+        await db.users.update_one({"user_id": user["user_id"]}, {"$unset": {"activity_type": "", "activity_text": "", "activity_emoji": ""}})
+    else:
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": update})
+    # Broadcast presence to friends + shared-server members
+    friends = await db.friends.find({"$or": [{"a": user["user_id"]}, {"b": user["user_id"]}], "status": "accepted"}, {"_id": 0}).to_list(500)
+    targets = set()
+    for f in friends:
+        targets.add(f["a"] if f["b"] == user["user_id"] else f["b"])
+    members = await db.members.find({"user_id": user["user_id"]}, {"_id": 0, "server_id": 1}).to_list(500)
+    for m in members:
+        co_members = await db.members.find({"server_id": m["server_id"]}, {"_id": 0, "user_id": 1}).to_list(2000)
+        for cm in co_members:
+            targets.add(cm["user_id"])
+    targets.discard(user["user_id"])
+    if targets:
+        await hub.send_users(list(targets), "presence.update", {"user_id": user["user_id"], **update})
+    return {"ok": True, **update}
+
+
+# ========== 6. STICKERS (CRUD + send) ==========
+class CreateStickerIn(BaseModel):
+    name: str = Field(min_length=2, max_length=32)
+    image_url: str = Field(min_length=1, max_length=2000)
+    tags: Optional[str] = Field("", max_length=200)
+
+@api.post("/servers/{server_id}/stickers")
+async def create_sticker(server_id: str, payload: CreateStickerIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    name = ''.join(c for c in payload.name if c.isalnum() or c in '_-').lower()
+    if not name or len(name) < 2:
+        raise HTTPException(status_code=400, detail="Nom de sticker invalide")
+    if await db.stickers.count_documents({"server_id": server_id}) >= 50:
+        raise HTTPException(status_code=400, detail="Limite de 50 stickers par serveur atteinte")
+    doc = {
+        "sticker_id": gen_id("stk"),
+        "server_id": server_id,
+        "name": name,
+        "image_url": payload.image_url,
+        "tags": payload.tags or "",
+        "creator_id": user["user_id"],
+        "created_at": now_iso(),
+    }
+    await db.stickers.insert_one(doc)
+    doc.pop("_id", None)
+    await hub.broadcast_server(server_id, "sticker.create", doc)
+    return doc
+
+@api.get("/servers/{server_id}/stickers")
+async def list_stickers(server_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user)
+    return await db.stickers.find({"server_id": server_id}, {"_id": 0}).to_list(100)
+
+@api.delete("/servers/{server_id}/stickers/{sticker_id}")
+async def delete_sticker(server_id: str, sticker_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    await db.stickers.delete_one({"sticker_id": sticker_id, "server_id": server_id})
+    await hub.broadcast_server(server_id, "sticker.delete", {"sticker_id": sticker_id})
+    return {"ok": True}
+
+class SendStickerIn(BaseModel):
+    channel_id: str
+    sticker_id: str
+
+@api.post("/stickers/send")
+async def send_sticker(payload: SendStickerIn, user: dict = Depends(get_current_user)):
+    ch = await _resolve_channel(payload.channel_id, user)
+    await require_membership(ch["server_id"], user, PERM_SEND)
+    st = await db.stickers.find_one({"sticker_id": payload.sticker_id}, {"_id": 0})
+    if not st:
+        raise HTTPException(status_code=404, detail="Sticker introuvable")
+    msg = {
+        "message_id": gen_id("msg"),
+        "channel_id": payload.channel_id,
+        "server_id": ch["server_id"],
+        "author_id": user["user_id"],
+        "content": "",
+        "type": "sticker",
+        "sticker": {"sticker_id": st["sticker_id"], "name": st["name"], "image_url": st["image_url"]},
+        "attachments": [], "reply_to": None, "reactions": [], "pinned": False,
+        "created_at": now_iso(), "edited_at": None, "deleted": False,
+    }
+    await db.messages.insert_one(msg)
+    msg.pop("_id", None)
+    msg["author"] = public_user(user)
+    await hub.broadcast_server(ch["server_id"], "message.create", msg)
+    return msg
+
+
+# ========== 7. SERVER TAGS ==========
+class ServerTagsIn(BaseModel):
+    tags: List[str] = Field(default_factory=list)
+
+@api.patch("/servers/{server_id}/tags")
+async def update_server_tags(server_id: str, payload: ServerTagsIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    # Sanitize: lowercase, max 20 chars, max 8 tags
+    clean = []
+    for t in payload.tags[:8]:
+        t = ''.join(c for c in t.lower() if c.isalnum() or c in '-_').strip()
+        if t and 2 <= len(t) <= 20 and t not in clean:
+            clean.append(t)
+    await db.servers.update_one({"server_id": server_id}, {"$set": {"tags": clean}})
+    await hub.broadcast_server(server_id, "server.update", {"server_id": server_id, "tags": clean})
+    return {"tags": clean}
+
+
+# ========== 8. BADGES ==========
+BADGES = {
+    "admin":   {"label": "Admin CentCord", "emoji": "⚡", "color": "#FF3B00"},
+    "nitro":   {"label": "CentCord Nitro", "emoji": "💎", "color": "#5865F2"},
+    "early":   {"label": "Utilisateur Fondateur", "emoji": "🌅", "color": "#F4A261"},
+    "boost":   {"label": "Booster", "emoji": "🚀", "color": "#FF73FA"},
+    "dev":     {"label": "Développeur", "emoji": "🔧", "color": "#3BA55D"},
+    "mod":     {"label": "Modérateur", "emoji": "🛡️", "color": "#43B8E6"},
+    "partner": {"label": "Partenaire", "emoji": "🤝", "color": "#FFD93D"},
+}
+
+class AwardBadgeIn(BaseModel):
+    user_id: str
+    badge: str
+
+@api.get("/badges/list")
+async def list_all_badges():
+    """Returns the catalog of available badges."""
+    return [{"id": k, **v} for k, v in BADGES.items()]
+
+@api.get("/users/{user_id}/badges")
+async def get_user_badges(user_id: str):
+    rows = await db.user_badges.find({"user_id": user_id}, {"_id": 0}).to_list(50)
+    out = []
+    u = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if u and u.get("role") == "admin":
+        out.append({"id": "admin", **BADGES["admin"], "awarded_at": u.get("created_at")})
+    for r in rows:
+        meta = BADGES.get(r["badge"])
+        if meta:
+            out.append({"id": r["badge"], **meta, "awarded_at": r.get("awarded_at")})
+    return out
+
+@api.post("/admin/badges")
+async def award_badge(payload: AwardBadgeIn, admin: dict = Depends(require_admin)):
+    if payload.badge not in BADGES:
+        raise HTTPException(status_code=400, detail="Badge inconnu")
+    target = await db.users.find_one({"user_id": payload.user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    existing = await db.user_badges.find_one({"user_id": payload.user_id, "badge": payload.badge})
+    if existing:
+        raise HTTPException(status_code=409, detail="Badge déjà attribué")
+    await db.user_badges.insert_one({
+        "badge_grant_id": gen_id("bdg"),
+        "user_id": payload.user_id,
+        "badge": payload.badge,
+        "awarded_at": now_iso(),
+        "awarded_by": admin["user_id"],
+    })
+    await hub.send_user(payload.user_id, "badge.granted", {"badge": payload.badge, **BADGES[payload.badge]})
+    return {"ok": True, "badge": payload.badge, **BADGES[payload.badge]}
+
+@api.delete("/admin/badges/{user_id}/{badge}")
+async def revoke_badge(user_id: str, badge: str, admin: dict = Depends(require_admin)):
+    await db.user_badges.delete_one({"user_id": user_id, "badge": badge})
+    return {"ok": True}
+
+
+# ========== 9. POLL GET + END ==========
+@api.get("/polls/{poll_id}")
+async def get_poll(poll_id: str, user: dict = Depends(get_current_user)):
+    poll = await db.polls.find_one({"poll_id": poll_id}, {"_id": 0})
+    if not poll:
+        raise HTTPException(status_code=404, detail="Sondage introuvable")
+    await require_membership(poll["server_id"], user)
+    # Auto-end if expired
+    if poll.get("expires_at") and not poll.get("ended"):
+        try:
+            exp = datetime.fromisoformat(poll["expires_at"])
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp < now_utc():
+                await db.polls.update_one({"poll_id": poll_id}, {"$set": {"ended": True}})
+                poll["ended"] = True
+        except Exception:
+            pass
+    return poll
+
+@api.post("/polls/{poll_id}/end")
+async def end_poll(poll_id: str, user: dict = Depends(get_current_user)):
+    poll = await db.polls.find_one({"poll_id": poll_id}, {"_id": 0})
+    if not poll:
+        raise HTTPException(status_code=404, detail="Sondage introuvable")
+    if poll["author_id"] != user["user_id"]:
+        # Only author or moderators can end
+        await require_membership(poll["server_id"], user, PERM_MANAGE_MESSAGES)
+    await db.polls.update_one({"poll_id": poll_id}, {"$set": {"ended": True, "ended_at": now_iso()}})
+    await hub.broadcast_server(poll["server_id"], "poll.end", {"poll_id": poll_id})
+    return {"ok": True}
+
+
+# ========== 10. CHANNEL MENTION PERMISSIONS ==========
+class MentionPermsIn(BaseModel):
+    allow_everyone: Optional[bool] = None
+    allow_role_ping: Optional[bool] = None
+    allowed_role_ids: Optional[List[str]] = None
+
+@api.patch("/channels/{channel_id}/mention-perms")
+async def update_mention_perms(channel_id: str, payload: MentionPermsIn, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Salon introuvable")
+    await require_membership(ch["server_id"], user, PERM_MANAGE_CHANNELS)
+    update = {}
+    if payload.allow_everyone is not None:
+        update["mention_allow_everyone"] = bool(payload.allow_everyone)
+    if payload.allow_role_ping is not None:
+        update["mention_allow_role_ping"] = bool(payload.allow_role_ping)
+    if payload.allowed_role_ids is not None:
+        update["mention_allowed_role_ids"] = list(payload.allowed_role_ids)[:50]
+    if update:
+        await db.channels.update_one({"channel_id": channel_id}, {"$set": update})
+        await hub.broadcast_server(ch["server_id"], "channel.update", {"channel_id": channel_id, **update})
+    return {"ok": True, **update}
+
+
+# ========== 11. GIF TRENDING ==========
+TRENDING_GIFS = [
+    {"id": 1,  "title": "Thumbs up",  "url": "https://media.giphy.com/media/111ebonMs90YLu/giphy.gif",        "preview": "https://media.giphy.com/media/111ebonMs90YLu/200w.gif"},
+    {"id": 2,  "title": "Wow",        "url": "https://media.giphy.com/media/5VKbvrjxpVJCM/giphy.gif",        "preview": "https://media.giphy.com/media/5VKbvrjxpVJCM/200w.gif"},
+    {"id": 3,  "title": "Dance",      "url": "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",    "preview": "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/200w.gif"},
+    {"id": 4,  "title": "Facepalm",   "url": "https://media.giphy.com/media/XsUtdIeJ0MWMo/giphy.gif",        "preview": "https://media.giphy.com/media/XsUtdIeJ0MWMo/200w.gif"},
+    {"id": 5,  "title": "Clap",       "url": "https://media.giphy.com/media/GEBGhvBpS7OmhL4fdK/giphy.gif",    "preview": "https://media.giphy.com/media/GEBGhvBpS7OmhL4fdK/200w.gif"},
+    {"id": 6,  "title": "Laugh",      "url": "https://media.giphy.com/media/ZqlvCTNHpqrio/giphy.gif",        "preview": "https://media.giphy.com/media/ZqlvCTNHpqrio/200w.gif"},
+    {"id": 7,  "title": "Mind blown", "url": "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",   "preview": "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/200w.gif"},
+    {"id": 8,  "title": "Nope",       "url": "https://media.giphy.com/media/3og0INyCmHlNylks9O/giphy.gif",   "preview": "https://media.giphy.com/media/3og0INyCmHlNylks9O/200w.gif"},
+    {"id": 9,  "title": "OK",         "url": "https://media.giphy.com/media/3oEjHAUOqG3lSS0f1C/giphy.gif",   "preview": "https://media.giphy.com/media/3oEjHAUOqG3lSS0f1C/200w.gif"},
+    {"id": 10, "title": "Hype",       "url": "https://media.giphy.com/media/YRuFixSNWFVcXaxpmX/giphy.gif",   "preview": "https://media.giphy.com/media/YRuFixSNWFVcXaxpmX/200w.gif"},
+    {"id": 11, "title": "Love it",    "url": "https://media.giphy.com/media/3ohzdIuqJoo8QdKlnW/giphy.gif",   "preview": "https://media.giphy.com/media/3ohzdIuqJoo8QdKlnW/200w.gif"},
+    {"id": 12, "title": "Shrug",      "url": "https://media.giphy.com/media/5C0a8IItAHRzqdU4bn/giphy.gif",   "preview": "https://media.giphy.com/media/5C0a8IItAHRzqdU4bn/200w.gif"},
+]
+
+@api.get("/gifs/trending")
+async def gif_trending(q: Optional[str] = None, _user: dict = Depends(get_current_user)):
+    if q:
+        ql = q.lower()
+        return [g for g in TRENDING_GIFS if ql in g["title"].lower()]
+    return TRENDING_GIFS
+
+
+# ========== 12. UPDATE DISCOVER to support tag filtering ==========
+@api.get("/servers/discover/by-tag/{tag}")
+async def discover_by_tag(tag: str, user: dict = Depends(get_current_user)):
+    tag = tag.lower().strip()
+    servers = await db.servers.find({"is_public": True, "tags": tag}, {"_id": 0}).limit(50).to_list(50)
+    for s in servers:
+        s["member_count"] = await db.members.count_documents({"server_id": s["server_id"]})
+    return servers
+
+
 # ========== Politique légale ==========
 @api.get("/legal/policy")
 async def get_policy():
@@ -1774,6 +2237,11 @@ async def on_startup():
     await db.emojis.create_index([("server_id", 1)])
     await db.threads.create_index([("channel_id", 1)])
     await db.boosts.create_index([("server_id", 1), ("user_id", 1)], unique=True)
+    # New collections
+    await db.read_markers.create_index([("user_id", 1), ("channel_id", 1)], unique=True)
+    await db.stickers.create_index([("server_id", 1)])
+    await db.user_badges.create_index([("user_id", 1), ("badge", 1)], unique=True)
+    await db.servers.create_index([("tags", 1)])
     log.info("Indexes ensured")
 
     # Seed admin

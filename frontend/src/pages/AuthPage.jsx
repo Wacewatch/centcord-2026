@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { useAuth } from "../lib/auth";
 import { formatApiError } from "../lib/api";
 import { ArrowRight, Mail, Lock, User } from "lucide-react";
-import CaptchaWidget from "../components/CaptchaWidget";
+import TurnstileWidget from "../components/TurnstileWidget";
 
 export default function AuthPage() {
   const [params] = useSearchParams();
@@ -16,7 +16,7 @@ export default function AuthPage() {
   const [displayName, setDisplayName] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [captchaOk, setCaptchaOk] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState(null);
   const { login, register, googleLogin, user } = useAuth();
   const navigate = useNavigate();
 
@@ -32,8 +32,8 @@ export default function AuthPage() {
         await login(email.trim(), password);
         toast.success("Connexion réussie");
       } else {
-        if (!captchaOk) { setError("Captcha invalide"); setLoading(false); return; }
-        await register(email.trim(), password, displayName.trim() || email.split("@")[0]);
+        if (!turnstileToken) { setError("Vérification anti-bot requise"); setLoading(false); return; }
+        await register(email.trim(), password, displayName.trim() || email.split("@")[0], turnstileToken);
         toast.success("Compte créé");
       }
       navigate("/app", { replace: true });
@@ -92,7 +92,7 @@ export default function AuthPage() {
             {mode === "register" && (
               <div>
                 <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Vérification anti-bot</label>
-                <div className="mt-2"><CaptchaWidget onValid={setCaptchaOk} /></div>
+                <div className="mt-2"><TurnstileWidget onToken={setTurnstileToken} /></div>
               </div>
             )}
 
@@ -100,7 +100,7 @@ export default function AuthPage() {
               <div data-testid="auth-error" className="text-cc-danger text-sm border-l-2 border-cc-danger pl-3">{error}</div>
             )}
 
-            <button data-testid="auth-submit" disabled={loading || (mode === "register" && !captchaOk)} className="w-full bg-cc-accent text-white font-bold tracking-wide uppercase py-4 cc-brutal-shadow cc-brutal-press disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+            <button data-testid="auth-submit" disabled={loading || (mode === "register" && !turnstileToken)} className="w-full bg-cc-accent text-white font-bold tracking-wide uppercase py-4 cc-brutal-shadow cc-brutal-press disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
               {loading ? <div className="cc-spinner" /> : <>{mode === "login" ? "Se connecter" : "Créer le compte"} <ArrowRight className="w-4 h-4" /></>}
             </button>
           </form>

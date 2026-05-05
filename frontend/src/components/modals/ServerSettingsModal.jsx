@@ -9,10 +9,14 @@ import { initials } from "../../lib/utils";
 
 const TABS = [
   { id: "overview", label: "Aperçu" },
+  { id: "stats", label: "Statistiques" },
   { id: "roles", label: "Rôles" },
+  { id: "categories", label: "Catégories" },
   { id: "invites", label: "Invitations" },
   { id: "emojis", label: "Émojis" },
+  { id: "stickers", label: "Stickers" },
   { id: "webhooks", label: "Webhooks" },
+  { id: "mention-perms", label: "Mentions" },
   { id: "bans", label: "Bannissements" },
   { id: "audit", label: "Journal d'audit" },
   { id: "danger", label: "Zone à risque" },
@@ -23,6 +27,11 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
   const navigate = useNavigate();
   const [tab, setTab] = useState("overview");
   const [form, setForm] = useState({ name: server.name, description: server.description, is_public: server.is_public });
+  const [tagsInput, setTagsInput] = useState((server.tags || []).join(", "));
+  const [stats, setStats] = useState(null);
+  const [categoriesList, setCategoriesList] = useState(server.categories || []);
+  const [stickers, setStickers] = useState([]);
+  const [newSticker, setNewSticker] = useState({ name: "", image_url: "", tags: "" });
   const [saving, setSaving] = useState(false);
   const [invites, setInvites] = useState([]);
   const [bans, setBans] = useState([]);
@@ -32,6 +41,7 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
   const [newEmoji, setNewEmoji] = useState({ name: "", image_url: "" });
   const [newWebhook, setNewWebhook] = useState({ name: "", channel_id: "" });
   const [reportText, setReportText] = useState("");
+  const [selectedChannelForPerms, setSelectedChannelForPerms] = useState(null);
   const isOwner = server.owner_id === user?.user_id;
 
   useEffect(() => {
@@ -40,13 +50,80 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
     if (tab === "audit") api.get(`/servers/${server.server_id}/audit-log`).then(r => setAudit(r.data)).catch(() => {});
     if (tab === "emojis") api.get(`/servers/${server.server_id}/emojis`).then(r => setEmojis(r.data)).catch(() => {});
     if (tab === "webhooks") api.get(`/servers/${server.server_id}/webhooks`).then(r => setWebhooks(r.data)).catch(() => {});
+    if (tab === "stats") api.get(`/servers/${server.server_id}/stats`).then(r => setStats(r.data)).catch(() => {});
+    if (tab === "stickers") api.get(`/servers/${server.server_id}/stickers`).then(r => setStickers(r.data)).catch(() => {});
   }, [tab, server.server_id]);
 
   const save = async () => {
     setSaving(true);
-    try { await api.patch(`/servers/${server.server_id}`, form); toast.success("Enregistré"); reload(); }
+    try {
+      await api.patch(`/servers/${server.server_id}`, form);
+      // Save tags
+      const tags = tagsInput.split(",").map(t => t.trim().toLowerCase()).filter(Boolean);
+      await api.patch(`/servers/${server.server_id}/tags`, { tags });
+      toast.success("Enregistré"); reload();
+    }
     catch (e) { toast.error(e?.response?.data?.detail || "Échec"); }
     finally { setSaving(false); }
+  };
+
+  const regenInviteCode = async () => {
+    if (!window.confirm("Régénérer le code d'invitation ? L'ancien ne fonctionnera plus.")) return;
+    try {
+      const { data } = await api.post(`/servers/${server.server_id}/invite/regen`);
+      toast.success(`Nouveau code : ${data.invite_code}`);
+      reload();
+    } catch (_) { toast.error("Échec"); }
+  };
+
+  const renameCategory = async (cat) => {
+    const name = window.prompt("Nouveau nom de catégorie", cat.name);
+    if (!name || name === cat.name) return;
+    try {
+      await api.patch(`/servers/${server.server_id}/categories/${cat.category_id}`, { name });
+      setCategoriesList(categoriesList.map(c => c.category_id === cat.category_id ? { ...c, name: name.toUpperCase() } : c));
+      toast.success("Renommée"); reload();
+    } catch (_) { toast.error("Échec"); }
+  };
+
+  const deleteCategory = async (cat) => {
+    if (!window.confirm(`Supprimer la catégorie "${cat.name}" ?`)) return;
+    try {
+      await api.delete(`/servers/${server.server_id}/categories/${cat.category_id}`);
+      setCategoriesList(categoriesList.filter(c => c.category_id !== cat.category_id));
+      toast.success("Supprimée"); reload();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Échec"); }
+  };
+
+  const createSticker = async () => {
+    if (!newSticker.name || !newSticker.image_url) { toast.error("Nom et image requis"); return; }
+    try {
+      const { data } = await api.post(`/servers/${server.server_id}/stickers`, newSticker);
+      setStickers([data, ...stickers]); setNewSticker({ name: "", image_url: "", tags: "" }); toast.success("Sticker ajouté");
+    } catch (e) { toast.error(e?.response?.data?.detail || "Échec"); }
+  };
+
+  const uploadStickerFile = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    try {
+      const { data } = await api.post("/uploads", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setNewSticker((p) => ({ ...p, image_url: `${process.env.REACT_APP_BACKEND_URL}${data.url}` }));
+    } catch (_) { toast.error("Échec du téléversement"); }
+    finally { e.target.value = ""; }
+  };
+
+  const deleteSticker = async (id) => {
+    try { await api.delete(`/servers/${server.server_id}/stickers/${id}`); setStickers(stickers.filter(s => s.sticker_id !== id)); }
+    catch (_) { toast.error("Échec"); }
+  };
+
+  const updateMentionPerms = async (channelId, body) => {
+    try {
+      await api.patch(`/channels/${channelId}/mention-perms`, body);
+      toast.success("Permissions mises à jour");
+      reload();
+    } catch (_) { toast.error("Échec"); }
   };
 
   const newInvite = async () => {
@@ -135,7 +212,98 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
                 <input type="checkbox" checked={form.is_public} onChange={(e) => setForm({ ...form, is_public: e.target.checked })} className="accent-cc-accent w-4 h-4" data-testid="server-edit-public" />
                 <span className="text-sm">Public — apparaît dans la découverte</span>
               </label>
+              <div>
+                <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Tags (séparés par virgules, max 8)</label>
+                <input data-testid="server-edit-tags" value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} placeholder="gaming, fr, dev" className="mt-2 w-full bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2.5 font-jetbrains text-xs" />
+              </div>
               <button data-testid="server-edit-save" onClick={save} disabled={saving} className="bg-cc-accent text-white font-bold uppercase tracking-wide px-5 py-2.5 cc-brutal-shadow cc-brutal-press disabled:opacity-50">{saving ? "Enregistrement" : "Enregistrer"}</button>
+            </div>
+          )}
+          {tab === "stats" && (
+            <div className="space-y-4">
+              <h3 className="font-display font-extrabold text-2xl uppercase tracking-tighter mb-2">Statistiques</h3>
+              {!stats ? <div className="cc-spinner mx-auto" /> : (
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    {label: "Membres", value: stats.member_count, testid: "stat-members"},
+                    {label: "En ligne", value: stats.online_count, testid: "stat-online"},
+                    {label: "Messages total", value: stats.message_count, testid: "stat-messages"},
+                    {label: "Messages 7 j", value: stats.messages_7d, testid: "stat-messages-7d"},
+                    {label: "Salons", value: stats.channel_count, testid: "stat-channels"},
+                    {label: "Rôles", value: stats.role_count, testid: "stat-roles"},
+                    {label: "Boosts", value: stats.boost_count, testid: "stat-boosts"},
+                  ].map((s) => (
+                    <div key={s.label} data-testid={s.testid} className="border border-cc-border bg-cc-surface2 px-4 py-3">
+                      <div className="text-[10px] uppercase tracking-widest text-cc-muted">{s.label}</div>
+                      <div className="font-display font-extrabold text-3xl mt-1">{s.value}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {tab === "categories" && (
+            <div>
+              <h3 className="font-display font-extrabold text-2xl uppercase tracking-tighter mb-4">Catégories</h3>
+              <ul className="space-y-2">
+                {categoriesList.map((cat) => (
+                  <li key={cat.category_id} className="border border-cc-border bg-cc-surface2 px-3 py-2 flex items-center gap-3">
+                    <span className="font-display font-bold uppercase text-sm flex-1">{cat.name}</span>
+                    <button onClick={() => renameCategory(cat)} data-testid={`cat-rename-${cat.category_id}`} className="text-[10px] uppercase tracking-widest font-bold text-cc-accent hover:text-cc-text">Renommer</button>
+                    <button onClick={() => deleteCategory(cat)} className="text-[10px] uppercase tracking-widest font-bold text-cc-muted hover:text-cc-danger">Supprimer</button>
+                  </li>
+                ))}
+                {categoriesList.length === 0 && <li className="text-cc-muted text-xs uppercase tracking-widest">Aucune catégorie.</li>}
+              </ul>
+            </div>
+          )}
+          {tab === "stickers" && (
+            <div>
+              <h3 className="font-display font-extrabold text-2xl uppercase tracking-tighter mb-4">Stickers du serveur</h3>
+              <div className="space-y-2 mb-4">
+                <input value={newSticker.name} onChange={(e) => setNewSticker({ ...newSticker, name: e.target.value })} placeholder="nom_sticker" data-testid="sticker-name" className="w-full bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 font-jetbrains" maxLength={32} />
+                <div className="flex gap-2 items-center">
+                  <input value={newSticker.image_url} onChange={(e) => setNewSticker({ ...newSticker, image_url: e.target.value })} placeholder="URL de l'image (PNG/WEBP/GIF)" className="flex-1 bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 font-jetbrains text-xs" />
+                  <label className="bg-cc-surface2 border border-cc-border px-3 py-2 text-xs uppercase tracking-widest font-bold cursor-pointer">Téléverser<input type="file" accept="image/*" className="hidden" onChange={uploadStickerFile} /></label>
+                </div>
+                <input value={newSticker.tags} onChange={(e) => setNewSticker({ ...newSticker, tags: e.target.value })} placeholder="tags (optionnel)" className="w-full bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 text-xs" />
+                {newSticker.image_url && <img src={newSticker.image_url} alt="" className="w-20 h-20 object-cover border border-cc-border" />}
+                <button onClick={createSticker} data-testid="sticker-create" className="bg-cc-accent text-white font-bold uppercase tracking-wide px-4 py-2 cc-brutal-shadow cc-brutal-press">Ajouter le sticker</button>
+              </div>
+              <ul className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                {stickers.map((st) => (
+                  <li key={st.sticker_id} className="border border-cc-border bg-cc-surface2 p-2 flex flex-col items-center gap-1 group">
+                    <img src={st.image_url} alt={st.name} className="w-16 h-16 object-cover" />
+                    <span className="font-mono text-[10px] truncate w-full text-center">{st.name}</span>
+                    <button onClick={() => deleteSticker(st.sticker_id)} className="opacity-0 group-hover:opacity-100 text-cc-muted hover:text-cc-danger text-xs uppercase tracking-widest">Supprimer</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {tab === "mention-perms" && (
+            <div>
+              <h3 className="font-display font-extrabold text-2xl uppercase tracking-tighter mb-4">Permissions de mention par salon</h3>
+              <select value={selectedChannelForPerms || ""} onChange={(e) => setSelectedChannelForPerms(e.target.value)} className="w-full bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 mb-3" data-testid="perm-channel-select">
+                <option value="">Choisir un salon</option>
+                {(server.channels || []).filter(c => c.type === "text").map(c => <option key={c.channel_id} value={c.channel_id}>#{c.name}</option>)}
+              </select>
+              {selectedChannelForPerms && (() => {
+                const ch = (server.channels || []).find(c => c.channel_id === selectedChannelForPerms);
+                if (!ch) return null;
+                return (
+                  <div className="border border-cc-border bg-cc-surface2 p-4 space-y-3">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input type="checkbox" defaultChecked={ch.mention_allow_everyone !== false} onChange={(e) => updateMentionPerms(ch.channel_id, { allow_everyone: e.target.checked })} className="accent-cc-accent w-4 h-4" data-testid="perm-everyone" />
+                      <span className="text-sm">Autoriser <span className="font-mono">@everyone</span> / <span className="font-mono">@here</span></span>
+                    </label>
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input type="checkbox" defaultChecked={ch.mention_allow_role_ping !== false} onChange={(e) => updateMentionPerms(ch.channel_id, { allow_role_ping: e.target.checked })} className="accent-cc-accent w-4 h-4" data-testid="perm-roles" />
+                      <span className="text-sm">Autoriser les mentions de rôles</span>
+                    </label>
+                  </div>
+                );
+              })()}
             </div>
           )}
           {tab === "roles" && (
@@ -157,9 +325,12 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
             <div>
               <button data-testid="invite-create" onClick={newInvite} className="bg-cc-accent text-white font-bold uppercase tracking-wide px-4 py-2 cc-brutal-shadow cc-brutal-press mb-4">Créer une invitation</button>
               <ul className="space-y-2">
-                <li className="border border-cc-border bg-cc-surface2 px-3 py-2 flex items-center justify-between">
-                  <span className="font-mono text-sm">{server.invite_code} <span className="text-[10px] uppercase tracking-widest text-cc-muted ml-2">par défaut</span></span>
-                  <button onClick={() => copy(server.invite_code)} className="text-cc-subtext hover:text-cc-accent" title="Copier"><Copy className="w-3.5 h-3.5" /></button>
+                <li className="border border-cc-border bg-cc-surface2 px-3 py-2 flex items-center justify-between gap-2">
+                  <span className="font-mono text-sm truncate">{server.invite_code} <span className="text-[10px] uppercase tracking-widest text-cc-muted ml-2">par défaut</span></span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => copy(server.invite_code)} className="text-cc-subtext hover:text-cc-accent" title="Copier"><Copy className="w-3.5 h-3.5" /></button>
+                    {isOwner && <button onClick={regenInviteCode} data-testid="regen-invite" className="text-[10px] uppercase tracking-widest font-bold text-cc-accent hover:text-cc-text">Régénérer</button>}
+                  </div>
                 </li>
                 {invites.map((inv) => (
                   <li key={inv.invite_id} className="border border-cc-border bg-cc-surface2 px-3 py-2 flex items-center justify-between">

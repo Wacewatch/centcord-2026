@@ -41,6 +41,17 @@ export default function ServerView({ servers, reload }) {
   const [replyTo, setReplyTo] = useState(null);
   const [activeThread, setActiveThread] = useState(null); // { thread, parent }
   const [customEmojis, setCustomEmojis] = useState([]);
+  const [unread, setUnread] = useState({}); // { channel_id: count }
+
+  const loadUnread = useCallback(async () => {
+    try { const { data } = await api.get(`/channels/unread`); setUnread(data || {}); } catch (_) {}
+  }, []);
+
+  const markRead = useCallback(async (cid) => {
+    if (!cid) return;
+    try { await api.post(`/channels/${cid}/read`, {}); } catch (_) {}
+    setUnread((u) => { const n = { ...u }; delete n[cid]; return n; });
+  }, []);
 
   const loadServer = useCallback(async () => {
     try {
@@ -68,14 +79,19 @@ export default function ServerView({ servers, reload }) {
     try { const { data } = await api.get(`/servers/${serverId}/emojis`); setCustomEmojis(data || []); } catch (_) {}
   }, [serverId]);
 
-  useEffect(() => { loadServer(); loadMembers(); loadEmojis(); }, [loadServer, loadMembers, loadEmojis]);
-  useEffect(() => { if (channel?.channel_id && channel.type === "text") loadMessages(channel.channel_id); }, [channel, loadMessages]);
+  useEffect(() => { loadServer(); loadMembers(); loadEmojis(); loadUnread(); }, [loadServer, loadMembers, loadEmojis, loadUnread]);
+  useEffect(() => { if (channel?.channel_id && channel.type === "text") { loadMessages(channel.channel_id); markRead(channel.channel_id); } }, [channel, loadMessages, markRead]);
   useEffect(() => { setReplyTo(null); setActiveThread(null); }, [channel?.channel_id]);
 
   useEffect(() => {
     if (!ws) return;
     const offC = ws.subscribe("message.create", (m) => {
-      if (m.channel_id === channel?.channel_id && !m.thread_id) setMessages((prev) => [...prev, m]);
+      if (m.channel_id === channel?.channel_id && !m.thread_id) {
+        setMessages((prev) => [...prev, m]);
+        markRead(m.channel_id);
+      } else if (m.channel_id && m.author_id !== user?.user_id) {
+        setUnread((u) => ({ ...u, [m.channel_id]: (u[m.channel_id] || 0) + 1 }));
+      }
     });
     const offU = ws.subscribe("message.update", (d) => setMessages((prev) => prev.map((m) => m.message_id === d.message_id ? { ...m, content: d.content, edited_at: d.edited_at } : m)));
     const offD = ws.subscribe("message.delete", (d) => setMessages((prev) => prev.filter((m) => m.message_id !== d.message_id)));
@@ -154,6 +170,7 @@ export default function ServerView({ servers, reload }) {
                     {list.map((c) => {
                       const Ic = channelIcon(c.type);
                       const active = c.channel_id === channel?.channel_id;
+                      const unreadCount = unread[c.channel_id] || 0;
                       return (
                         <li key={c.channel_id}>
                           <button
@@ -161,11 +178,16 @@ export default function ServerView({ servers, reload }) {
                             data-testid={`channel-${c.channel_id}`}
                             className={cn(
                               "w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors",
-                              active ? "bg-cc-surface2 text-cc-text" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text"
+                              active ? "bg-cc-surface2 text-cc-text" : (unreadCount > 0 ? "text-cc-text font-bold hover:bg-cc-surface2" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text")
                             )}
                           >
                             <Ic className="w-4 h-4 text-cc-muted shrink-0" />
-                            <span className="truncate">{c.name}</span>
+                            <span className="truncate flex-1 text-left">{c.name}</span>
+                            {unreadCount > 0 && !active && (
+                              <span className="shrink-0 text-[10px] font-bold bg-cc-accent text-white px-1.5 py-0.5 rounded-full min-w-[18px] text-center" data-testid={`unread-${c.channel_id}`}>
+                                {unreadCount > 99 ? "99+" : unreadCount}
+                              </span>
+                            )}
                           </button>
                         </li>
                       );

@@ -104,6 +104,7 @@ export default function MessageComposer({
           {showPicker && (
             <EmojiGifPicker
               serverId={serverId}
+              channelId={channelId}
               onPickEmoji={insertEmoji}
               onPickGif={sendGif}
               onClose={() => setShowPicker(false)}

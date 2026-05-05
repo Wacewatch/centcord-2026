@@ -135,6 +135,11 @@ export default function Message({ msg, grouped, mine, onReact, onReply, onCreate
           )
         )}
         {msg.poll && <PollCard poll={msg.poll} />}
+        {msg.sticker && (
+          <div className="mt-1" data-testid={`sticker-msg-${msg.message_id}`}>
+            <img src={msg.sticker.image_url} alt={msg.sticker.name} title={`:${msg.sticker.name}:`} className="max-h-32 max-w-[160px] border border-cc-border" />
+          </div>
+        )}
         {msg.attachments && msg.attachments.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-2">
             {msg.attachments.map((a, i) => {
