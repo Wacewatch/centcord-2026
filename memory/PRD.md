@@ -65,14 +65,19 @@ User uploaded a 1700+ line PHP file (`centcord.php`) — a Discord-style chat & 
 - `admin@centcord.app` / `CentCordAdmin!2026` (auto-seeded)
 
 ## Backlog (P0/P1/P2)
-### P1 — next iteration
-- Threads (per-message thread chains)
-- Polls in messages
-- Custom emojis & stickers picker UI (backend stubs already present)
-- Notifications panel (mark read / unread badges)
-- Search-within-channel UI (backend done)
-- Voice channel actual WebRTC integration (UI shell + signaling done)
-- Server boost UI
+### P1 — IMPLEMENTED in 2026-05 update
+- ✅ Threads (per-message thread chains) — `ThreadPanel.jsx` + create-from-message
+- ✅ Polls in messages — `PollComposer.jsx` + `PollCard.jsx` with realtime votes
+- ✅ Custom emojis & stickers picker UI — `EmojiGifPicker.jsx` (Unicode + custom + curated GIFs)
+- ✅ Notifications panel — globally wired in `UserBar` and channel header
+- ✅ Search-within-channel UI — `SearchModal.jsx` accessible via header icon
+- ✅ Voice channel actual WebRTC integration — `VoiceRoom.jsx` (P2P with STUN, mute/deafen)
+- ✅ Server boost UI — `BoostBadge.jsx` in channel header (tier 1/2/3)
+- ✅ Bookmarks page — `BookmarksPage.jsx` accessible from DM sidebar
+- ✅ Reply-to (banner in composer + preview in message)
+- ✅ Pin viewer modal — `PinModal.jsx` accessible via header icon
+- ✅ Captcha anti-bot — math captcha in registration form
+- ✅ GIF picker — curated trending GIFs (no API key required)
 
 ### P2 — polish
 - Light theme / per-user theme switcher

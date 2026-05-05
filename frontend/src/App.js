@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { WSProvider } from "./lib/ws";
 import LandingPage from "./pages/LandingPage";
+import LegalPage from "./pages/LegalPage";
 import AuthPage from "./pages/AuthPage";
 import AppLayout from "./pages/AppLayout";
 

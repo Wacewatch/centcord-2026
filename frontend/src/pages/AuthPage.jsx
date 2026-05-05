@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { useAuth } from "../lib/auth";
 import { formatApiError } from "../lib/api";
 import { ArrowRight, Mail, Lock, User } from "lucide-react";
+import CaptchaWidget from "../components/CaptchaWidget";
 
 export default function AuthPage() {
   const [params] = useSearchParams();
@@ -15,6 +16,7 @@ export default function AuthPage() {
   const [displayName, setDisplayName] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [captchaOk, setCaptchaOk] = useState(false);
   const { login, register, googleLogin, user } = useAuth();
   const navigate = useNavigate();
 
@@ -30,6 +32,7 @@ export default function AuthPage() {
         await login(email.trim(), password);
         toast.success("Connexion réussie");
       } else {
+        if (!captchaOk) { setError("Captcha invalide"); setLoading(false); return; }
         await register(email.trim(), password, displayName.trim() || email.split("@")[0]);
         toast.success("Compte créé");
       }
@@ -86,11 +89,18 @@ export default function AuthPage() {
               {mode === "register" && <p className="text-[10px] text-cc-muted mt-2 uppercase tracking-widest">Min. 8 caractères · stocké en bcrypt</p>}
             </div>
 
+            {mode === "register" && (
+              <div>
+                <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Vérification anti-bot</label>
+                <div className="mt-2"><CaptchaWidget onValid={setCaptchaOk} /></div>
+              </div>
+            )}
+
             {error && (
               <div data-testid="auth-error" className="text-cc-danger text-sm border-l-2 border-cc-danger pl-3">{error}</div>
             )}
 
-            <button data-testid="auth-submit" disabled={loading} className="w-full bg-cc-accent text-white font-bold tracking-wide uppercase py-4 cc-brutal-shadow cc-brutal-press disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+            <button data-testid="auth-submit" disabled={loading || (mode === "register" && !captchaOk)} className="w-full bg-cc-accent text-white font-bold tracking-wide uppercase py-4 cc-brutal-shadow cc-brutal-press disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
               {loading ? <div className="cc-spinner" /> : <>{mode === "login" ? "Se connecter" : "Créer le compte"} <ArrowRight className="w-4 h-4" /></>}
             </button>
           </form>

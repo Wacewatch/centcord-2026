@@ -5,6 +5,7 @@ import { Mic, MicOff, Headphones, Settings as SettingsIcon, LogOut, Edit2 } from
 import { useNavigate } from "react-router-dom";
 import api from "../lib/api";
 import { toast } from "sonner";
+import NotificationsPanel from "./NotificationsPanel";
 
 export default function UserBar() {
   const { user, logout, refreshUser } = useAuth();
@@ -64,6 +65,7 @@ export default function UserBar() {
       <button data-testid="userbar-deafen" onClick={() => setDeafened(!deafened)} className={`p-2 hover:bg-cc-base transition-colors ${deafened ? "text-cc-danger" : "text-cc-subtext hover:text-cc-text"}`}>
         <Headphones className="w-4 h-4" />
       </button>
+      <NotificationsPanel />
       <button data-testid="userbar-settings" onClick={() => navigate("/app/settings")} className="p-2 hover:bg-cc-base text-cc-subtext hover:text-cc-text transition-colors">
         <SettingsIcon className="w-4 h-4" />
       </button>

@@ -9,6 +9,7 @@ import DMView from "../components/DMView";
 import ServerView from "../components/ServerView";
 import DiscoverPage from "../components/DiscoverPage";
 import SettingsPage from "../components/SettingsPage";
+import BookmarksPage from "./BookmarksPage";
 import CreateServerModal from "../components/modals/CreateServerModal";
 import JoinServerModal from "../components/modals/JoinServerModal";
 import { toast } from "sonner";
@@ -52,6 +53,7 @@ export default function AppLayout() {
       <Routes>
         <Route path="/" element={<Navigate to="/app/me" replace />} />
         <Route path="/me" element={<DMHome />} />
+        <Route path="/me/bookmarks" element={<BookmarksPage />} />
         <Route path="/me/:dmId" element={<DMView />} />
         <Route path="/discover" element={<DiscoverPage onJoined={loadServers} />} />
         <Route path="/settings" element={<SettingsPage />} />

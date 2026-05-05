@@ -81,18 +81,20 @@ export default function DMView() {
     return () => { offCreate(); offUpdate(); offDel(); offRx(); };
   }, [ws, dmId, decryptOne]);
 
-  const sendMessage = async (content, attachments) => {
-    let payload = { content, attachments };
+  const [replyTo, setReplyTo] = useState(null);
+  const sendMessage = async (content, attachments, reply_to) => {
+    let payload = { content, attachments, reply_to };
     let theirPub = null;
     try { theirPub = other?.public_key ? JSON.parse(other.public_key) : null; } catch (_) {}
     if (theirPub && myKeysRef.current?.priv) {
       const enc = await encryptDM(content, myKeysRef.current.priv, theirPub);
       if (enc.nonce) {
-        payload = { content: enc.content, nonce: enc.nonce, attachments };
+        payload = { content: enc.content, nonce: enc.nonce, attachments, reply_to };
       }
     }
     try { await api.post(`/dms/${dmId}/messages`, payload); }
     catch (e) { toast.error("Échec de l'envoi"); }
+    setReplyTo(null);
   };
 
   return (
@@ -129,8 +131,8 @@ export default function DMView() {
           <div className="flex-1 flex items-center justify-center"><div className="cc-spinner" /></div>
         ) : (
           <>
-            <MessageList messages={messages} currentUser={user} onReact={(id, e) => api.post(`/messages/${id}/reactions`, { emoji: e })} />
-            <MessageComposer placeholder={`Message à ${other?.display_name || ""} (E2E)`} onSend={sendMessage} testIdPrefix="dm" />
+            <MessageList messages={messages} currentUser={user} onReact={(id, e) => api.post(`/messages/${id}/reactions`, { emoji: e })} onReply={(m) => setReplyTo(m)} />
+            <MessageComposer placeholder={`Message à ${other?.display_name || ""} (E2E)`} onSend={sendMessage} testIdPrefix="dm" replyTo={replyTo} onCancelReply={() => setReplyTo(null)} />
           </>
         )}
       </div>

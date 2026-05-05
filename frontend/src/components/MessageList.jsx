@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Message from "./Message";
 
-export default function MessageList({ messages, currentUser, onReact }) {
+export default function MessageList({ messages, currentUser, onReact, onReply, onCreateThread, onOpenThread, customEmojiMap }) {
   const ref = useRef(null);
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
@@ -21,7 +21,16 @@ export default function MessageList({ messages, currentUser, onReact }) {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.15 }}
             >
-              <Message msg={m} grouped={grouped} mine={m.author_id === currentUser?.user_id} onReact={onReact} />
+              <Message
+                msg={m}
+                grouped={grouped}
+                mine={m.author_id === currentUser?.user_id}
+                onReact={onReact}
+                onReply={onReply}
+                onCreateThread={onCreateThread}
+                onOpenThread={onOpenThread}
+                customEmojiMap={customEmojiMap}
+              />
             </motion.div>
           );
         })}

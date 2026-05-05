@@ -9,8 +9,13 @@ import MessageComposer from "./MessageComposer";
 import MembersSidebar from "./MembersSidebar";
 import NotificationsPanel from "./NotificationsPanel";
 import ServerSettingsModal from "./modals/ServerSettingsModal";
-import { Hash, Volume2, Megaphone, BookOpen, ChevronDown, ChevronRight, Plus, Settings, Users, Pin, Search, Bell } from "lucide-react";
-import { initials, cn } from "../lib/utils";
+import PinModal from "./PinModal";
+import SearchModal from "./SearchModal";
+import ThreadPanel from "./ThreadPanel";
+import VoiceRoom from "./VoiceRoom";
+import BoostBadge from "./BoostBadge";
+import { Hash, Volume2, Megaphone, BookOpen, ChevronDown, ChevronRight, Plus, Settings, Users, Pin, Search } from "lucide-react";
+import { cn } from "../lib/utils";
 import { toast } from "sonner";
 
 const channelIcon = (type) => ({
@@ -29,6 +34,11 @@ export default function ServerView({ servers, reload }) {
   const [showMembers, setShowMembers] = useState(true);
   const [collapsedCats, setCollapsedCats] = useState({});
   const [openSettings, setOpenSettings] = useState(false);
+  const [openPins, setOpenPins] = useState(false);
+  const [openSearch, setOpenSearch] = useState(false);
+  const [replyTo, setReplyTo] = useState(null);
+  const [activeThread, setActiveThread] = useState(null); // { thread, parent }
+  const [customEmojis, setCustomEmojis] = useState([]);
 
   const loadServer = useCallback(async () => {
     try {
@@ -52,13 +62,18 @@ export default function ServerView({ servers, reload }) {
     try { const { data } = await api.get(`/channels/${cid}/messages?limit=50`); setMessages(data); } catch (_) {}
   }, []);
 
-  useEffect(() => { loadServer(); loadMembers(); }, [loadServer, loadMembers]);
+  const loadEmojis = useCallback(async () => {
+    try { const { data } = await api.get(`/servers/${serverId}/emojis`); setCustomEmojis(data || []); } catch (_) {}
+  }, [serverId]);
+
+  useEffect(() => { loadServer(); loadMembers(); loadEmojis(); }, [loadServer, loadMembers, loadEmojis]);
   useEffect(() => { if (channel?.channel_id && channel.type === "text") loadMessages(channel.channel_id); }, [channel, loadMessages]);
+  useEffect(() => { setReplyTo(null); setActiveThread(null); }, [channel?.channel_id]);
 
   useEffect(() => {
     if (!ws) return;
     const offC = ws.subscribe("message.create", (m) => {
-      if (m.channel_id === channel?.channel_id) setMessages((prev) => [...prev, m]);
+      if (m.channel_id === channel?.channel_id && !m.thread_id) setMessages((prev) => [...prev, m]);
     });
     const offU = ws.subscribe("message.update", (d) => setMessages((prev) => prev.map((m) => m.message_id === d.message_id ? { ...m, content: d.content, edited_at: d.edited_at } : m)));
     const offD = ws.subscribe("message.delete", (d) => setMessages((prev) => prev.filter((m) => m.message_id !== d.message_id)));
@@ -66,8 +81,15 @@ export default function ServerView({ servers, reload }) {
     const offChCreate = ws.subscribe("channel.create", () => loadServer());
     const offChDel = ws.subscribe("channel.delete", () => loadServer());
     const offMember = ws.subscribe("member.join", () => loadMembers());
-    return () => { offC(); offU(); offD(); offR(); offChCreate(); offChDel(); offMember(); };
-  }, [ws, channel, loadServer, loadMembers]);
+    const offEmCreate = ws.subscribe("emoji.create", () => loadEmojis());
+    const offEmDel = ws.subscribe("emoji.delete", () => loadEmojis());
+    const offBoost = ws.subscribe("server.boost", () => loadServer());
+    const offThread = ws.subscribe("thread.create", (t) => {
+      // Mark parent message as having a thread
+      setMessages((prev) => prev.map((m) => m.message_id === t.parent_message_id ? { ...m, thread_id: t.thread_id } : m));
+    });
+    return () => { offC(); offU(); offD(); offR(); offChCreate(); offChDel(); offMember(); offEmCreate(); offEmDel(); offBoost(); offThread(); };
+  }, [ws, channel, loadServer, loadMembers, loadEmojis]);
 
   if (!server) {
     return (
@@ -76,6 +98,8 @@ export default function ServerView({ servers, reload }) {
       </main>
     );
   }
+
+  const customEmojiMap = customEmojis.reduce((acc, e) => { acc[e.name] = e.image_url; return acc; }, {});
 
   const channelsByCat = {};
   for (const c of server.channels || []) {
@@ -86,19 +110,30 @@ export default function ServerView({ servers, reload }) {
   const cats = [...(server.categories || [])];
   const Icon = channelIcon(channel?.type);
 
-  const sendMsg = async (content, attachments) => {
+  const sendMsg = async (content, attachments, reply_to) => {
     if (!channel) return;
-    try { await api.post(`/channels/${channel.channel_id}/messages`, { content, attachments }); }
+    try { await api.post(`/channels/${channel.channel_id}/messages`, { content, attachments, reply_to }); }
     catch (_) { toast.error("Échec de l'envoi"); }
   };
 
   const createChannel = async () => {
     const name = prompt("Nom du salon ?");
     if (!name) return;
+    const type = prompt("Type ? (text / voice / announcement)", "text") || "text";
     try {
-      await api.post(`/servers/${serverId}/channels`, { name, type: "text" });
+      await api.post(`/servers/${serverId}/channels`, { name, type });
       await loadServer();
     } catch (e) { toast.error(e?.response?.data?.detail || "Échec de création du salon"); }
+  };
+
+  const handleCreateThread = async (parentMsg) => {
+    const name = prompt("Nom du fil ?", parentMsg.content?.slice(0, 50) || "Discussion");
+    if (!name) return;
+    try {
+      const { data } = await api.post(`/channels/${parentMsg.channel_id}/threads`, { name, parent_message_id: parentMsg.message_id });
+      toast.success("Fil créé");
+      setActiveThread({ thread: data, parent: parentMsg });
+    } catch (_) { toast.error("Échec"); }
   };
 
   return (
@@ -175,30 +210,45 @@ export default function ServerView({ servers, reload }) {
             </>
           )}
           <div className="ml-auto flex items-center gap-1">
-            <button data-testid="header-pins" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Épinglés"><Pin className="w-4 h-4" /></button>
+            <BoostBadge server={server} onChange={loadServer} />
+            <button onClick={() => setOpenPins(true)} data-testid="header-pins" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Épinglés"><Pin className="w-4 h-4" /></button>
             <button data-testid="header-toggle-members" onClick={() => setShowMembers(!showMembers)} className={cn("p-2 hover:bg-cc-surface2 transition-colors", showMembers ? "text-cc-text" : "text-cc-subtext")} title="Membres"><Users className="w-4 h-4" /></button>
-            <button data-testid="header-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Rechercher"><Search className="w-4 h-4" /></button>
+            <button onClick={() => setOpenSearch(true)} data-testid="header-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Rechercher"><Search className="w-4 h-4" /></button>
             <NotificationsPanel />
             <button data-testid="header-settings" onClick={() => setOpenSettings(true)} className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Paramètres"><Settings className="w-4 h-4" /></button>
           </div>
         </header>
         {channel?.type === "voice" ? (
-          <div className="flex-1 flex flex-col items-center justify-center bg-cc-surface2 p-10">
-            <Volume2 className="w-12 h-12 text-cc-muted mb-4" />
-            <div className="font-display font-extrabold text-2xl uppercase tracking-tight">{channel.name}</div>
-            <p className="text-cc-subtext mt-2 max-w-md text-center text-sm">Les salons vocaux sont prêts (signalisation WebRTC). Connectez les pairs via /api/voice/signal.</p>
-            <button data-testid="join-voice" className="mt-6 bg-cc-accent text-white font-bold uppercase tracking-wider px-6 py-3 cc-brutal-shadow cc-brutal-press">Rejoindre le vocal</button>
-          </div>
+          <VoiceRoom channel={channel} server={server} />
         ) : (
           <>
-            <MessageList messages={messages} currentUser={user} onReact={(id, e) => api.post(`/messages/${id}/reactions`, { emoji: e })} />
-            <MessageComposer placeholder={`Message #${channel?.name || ""}`} onSend={sendMsg} testIdPrefix="ch" />
+            <MessageList
+              messages={messages}
+              currentUser={user}
+              onReact={(id, e) => api.post(`/messages/${id}/reactions`, { emoji: e })}
+              onReply={(m) => setReplyTo(m)}
+              onCreateThread={handleCreateThread}
+              onOpenThread={(t, parent) => setActiveThread({ thread: t, parent })}
+              customEmojiMap={customEmojiMap}
+            />
+            <MessageComposer
+              placeholder={`Message #${channel?.name || ""}`}
+              onSend={sendMsg}
+              testIdPrefix="ch"
+              serverId={serverId}
+              channelId={channel?.channel_id}
+              replyTo={replyTo}
+              onCancelReply={() => setReplyTo(null)}
+            />
           </>
         )}
       </main>
 
-      {showMembers && <MembersSidebar members={members} server={server} reload={loadMembers} />}
+      {activeThread && <ThreadPanel thread={activeThread.thread} parentMessage={activeThread.parent} onClose={() => setActiveThread(null)} />}
+      {showMembers && !activeThread && <MembersSidebar members={members} server={server} reload={loadMembers} />}
       {openSettings && <ServerSettingsModal server={server} reload={() => { loadServer(); reload && reload(); }} onClose={() => setOpenSettings(false)} />}
+      {openPins && channel && <PinModal channelId={channel.channel_id} onClose={() => setOpenPins(false)} />}
+      {openSearch && <SearchModal serverId={serverId} onClose={() => setOpenSearch(false)} />}
     </>
   );
 }

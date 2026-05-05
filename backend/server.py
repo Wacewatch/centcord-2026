@@ -1041,8 +1041,30 @@ async def get_messages(channel_id: str, before: Optional[str] = None, limit: int
     user_ids = list({r["author_id"] for r in rows})
     users = await db.users.find({"user_id": {"$in": user_ids}}, {"_id": 0}).to_list(2000)
     umap = {u["user_id"]: public_user(u) for u in users}
+    # Enrich polls
+    poll_ids = [r["poll_id"] for r in rows if r.get("poll_id")]
+    polls = {}
+    if poll_ids:
+        for p in await db.polls.find({"poll_id": {"$in": poll_ids}}, {"_id": 0}).to_list(200):
+            polls[p["poll_id"]] = p
+    # Enrich reply-to data
+    reply_ids = [r["reply_to"] for r in rows if r.get("reply_to")]
+    reply_map = {}
+    if reply_ids:
+        replied = await db.messages.find({"message_id": {"$in": reply_ids}}, {"_id": 0}).to_list(500)
+        # author info for replies
+        ruids = list({m["author_id"] for m in replied})
+        rusers = await db.users.find({"user_id": {"$in": ruids}}, {"_id": 0}).to_list(500)
+        rumap = {u["user_id"]: public_user(u) for u in rusers}
+        for m in replied:
+            m["author"] = rumap.get(m["author_id"])
+            reply_map[m["message_id"]] = m
     for r in rows:
         r["author"] = umap.get(r["author_id"])
+        if r.get("poll_id") and r["poll_id"] in polls:
+            r["poll"] = polls[r["poll_id"]]
+        if r.get("reply_to") and r["reply_to"] in reply_map:
+            r["reply_to_data"] = reply_map[r["reply_to"]]
     return rows
 
 @api.post("/channels/{channel_id}/messages")
