@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import Message from "./Message";
 import { MessageListSkeleton } from "./Skeletons";
 
-export default function MessageList({ messages, currentUser, onReact, onReply, onCreateThread, onOpenThread, onOpenProfile, customEmojiMap, loading }) {
+export default function MessageList({ messages, currentUser, onReact, onReply, onCreateThread, onOpenThread, onOpenProfile, memberColorMap, customEmojiMap, loading }) {
   const ref = useRef(null);
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
@@ -39,6 +39,7 @@ export default function MessageList({ messages, currentUser, onReact, onReply, o
                 onCreateThread={onCreateThread}
                 onOpenThread={onOpenThread}
                 onOpenProfile={onOpenProfile}
+                authorColor={memberColorMap?.[m.author_id]}
                 customEmojiMap={customEmojiMap}
               />
             </motion.div>

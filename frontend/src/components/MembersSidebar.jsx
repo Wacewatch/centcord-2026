@@ -15,6 +15,23 @@ export default function MembersSidebar({ members, server, reload, loading }) {
     else groupBy.Offline.push(m);
   }
   const canKick = (server?.my_perms || 0) & (1 << 5);
+
+  // Build a memoized highest-role color map
+  const colorMap = React.useMemo(() => {
+    if (!server?.roles) return {};
+    const roles = [...(server.roles || [])].sort((a, b) => (b.position || 0) - (a.position || 0));
+    const map = {};
+    for (const m of members) {
+      const ridSet = new Set(m.role_ids || []);
+      for (const r of roles) {
+        if (ridSet.has(r.role_id) && r.color && r.color !== "#99AAB5" && r.color !== "#000000") {
+          map[m.user_id] = r.color;
+          break;
+        }
+      }
+    }
+    return map;
+  }, [server, members]);
   const kick = async (uid) => {
     if (!window.confirm("Expulser ce membre ?")) return;
     try { await api.delete(`/servers/${server.server_id}/members/${uid}`); reload(); toast.success("Membre expulsé"); }
@@ -47,7 +64,7 @@ export default function MembersSidebar({ members, server, reload, loading }) {
                   <span className={`absolute -bottom-0.5 -right-0.5 cc-status-dot ${presenceColor(m.user.status)}`} />
                 </div>
                 <div className="flex-1 min-w-0 text-sm truncate" data-testid={`member-${m.user_id}`}>
-                  <div className="truncate">
+                  <div className="truncate" style={{ color: colorMap[m.user_id] || undefined }}>
                     {m.nickname || m.user.display_name}
                     {owner === m.user_id && <span className="ml-2 text-[8px] uppercase tracking-widest text-cc-accent">Propriétaire</span>}
                   </div>

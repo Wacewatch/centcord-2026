@@ -46,7 +46,7 @@ function renderContent(content, customEmojiMap = {}) {
   });
 }
 
-export default function Message({ msg, grouped, mine, onReact, onReply, onCreateThread, onOpenThread, customEmojiMap, onOpenProfile }) {
+export default function Message({ msg, grouped, mine, onReact, onReply, onCreateThread, onOpenThread, customEmojiMap, onOpenProfile, authorColor }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(msg.content);
   const [showEmoji, setShowEmoji] = useState(false);
@@ -110,7 +110,8 @@ export default function Message({ msg, grouped, mine, onReact, onReply, onCreate
               type="button"
               onClick={() => !isWebhook && onOpenProfile && onOpenProfile(author.user_id)}
               disabled={isWebhook || !onOpenProfile}
-              className="font-display font-extrabold text-cc-accent hover:underline disabled:no-underline disabled:cursor-default"
+              className="font-display font-extrabold hover:underline disabled:no-underline disabled:cursor-default"
+              style={{ color: authorColor || "var(--cc-accent, #FF3B00)" }}
               data-testid={`msg-author-${msg.message_id}`}
             >
               {displayName}

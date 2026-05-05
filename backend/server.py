@@ -1727,6 +1727,18 @@ async def voice_channel_participants(channel_id: str, user: dict = Depends(get_c
     await require_membership(ch["server_id"], user, PERM_VIEW)
     return list(VOICE_PRESENCE.get(channel_id, {}).values())
 
+
+@api.get("/servers/{server_id}/voice-participants")
+async def server_voice_participants(server_id: str, user: dict = Depends(get_current_user)):
+    """Returns { channel_id: [participants] } for ALL voice channels of a server."""
+    await require_membership(server_id, user, PERM_VIEW)
+    voice_chans = await db.channels.find({"server_id": server_id, "type": "voice"}, {"_id": 0, "channel_id": 1}).to_list(200)
+    out: Dict[str, list] = {}
+    for ch in voice_chans:
+        cid = ch["channel_id"]
+        out[cid] = list(VOICE_PRESENCE.get(cid, {}).values())
+    return out
+
 # ========== WebSocket ==========
 @api.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket, token: Optional[str] = Query(None)):

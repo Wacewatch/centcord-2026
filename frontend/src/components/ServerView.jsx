@@ -46,6 +46,28 @@ export default function ServerView({ servers, reload }) {
   const [customEmojis, setCustomEmojis] = useState([]);
   const [unread, setUnread] = useState({}); // { channel_id: count }
   const [profileUserId, setProfileUserId] = useState(null);
+  const [voicePresence, setVoicePresence] = useState({}); // { channel_id: [participants] }
+
+  // Compute role color for any member (highest-position role with a non-default color)
+  const memberColorMap = React.useMemo(() => {
+    if (!server?.roles || !members?.length) return {};
+    const roles = [...(server.roles || [])].sort((a, b) => (b.position || 0) - (a.position || 0));
+    const map = {};
+    for (const m of members) {
+      const ridSet = new Set(m.role_ids || []);
+      for (const r of roles) {
+        if (ridSet.has(r.role_id) && r.color && r.color !== "#99AAB5" && r.color !== "#000000") {
+          map[m.user_id] = r.color;
+          break;
+        }
+      }
+    }
+    return map;
+  }, [server, members]);
+
+  const loadVoicePresence = useCallback(async () => {
+    try { const { data } = await api.get(`/servers/${serverId}/voice-participants`); setVoicePresence(data || {}); } catch (_) {}
+  }, [serverId]);
 
   const loadUnread = useCallback(async () => {
     try { const { data } = await api.get(`/channels/unread`); setUnread(data || {}); } catch (_) {}
@@ -83,7 +105,7 @@ export default function ServerView({ servers, reload }) {
     try { const { data } = await api.get(`/servers/${serverId}/emojis`); setCustomEmojis(data || []); } catch (_) {}
   }, [serverId]);
 
-  useEffect(() => { loadServer(); loadMembers(); loadEmojis(); loadUnread(); }, [loadServer, loadMembers, loadEmojis, loadUnread]);
+  useEffect(() => { loadServer(); loadMembers(); loadEmojis(); loadUnread(); loadVoicePresence(); }, [loadServer, loadMembers, loadEmojis, loadUnread, loadVoicePresence]);
   useEffect(() => { if (channel?.channel_id && channel.type === "text") { loadMessages(channel.channel_id); markRead(channel.channel_id); } }, [channel, loadMessages, markRead]);
   useEffect(() => { setReplyTo(null); setActiveThread(null); }, [channel?.channel_id]);
 
@@ -118,6 +140,10 @@ export default function ServerView({ servers, reload }) {
     const offEmDel = ws.subscribe("emoji.delete", () => loadEmojis());
     const offBoost = ws.subscribe("server.boost", () => loadServer());
     const offBoostReward = ws.subscribe("server.boost.reward", () => loadServer());
+    const offVoice = ws.subscribe("voice.presence", (p) => {
+      if (!p?.channel_id) return;
+      setVoicePresence((v) => ({ ...v, [p.channel_id]: p.participants || [] }));
+    });
     const offThread = ws.subscribe("thread.create", (t) => {
       // Mark parent message as having a thread
       setMessages((prev) => prev.map((m) => m.message_id === t.parent_message_id ? { ...m, thread_id: t.thread_id } : m));
@@ -131,6 +157,7 @@ export default function ServerView({ servers, reload }) {
       offSrvUpdate();
       offEmCreate(); offEmDel();
       offBoost(); offBoostReward();
+      offVoice();
       offThread();
     };
   }, [ws, channel, loadServer, loadMembers, loadEmojis, markRead, user?.user_id]);
@@ -239,6 +266,7 @@ export default function ServerView({ servers, reload }) {
                       const Ic = channelIcon(c.type);
                       const active = c.channel_id === channel?.channel_id;
                       const unreadCount = unread[c.channel_id] || 0;
+                      const vps = voicePresence[c.channel_id] || [];
                       return (
                         <li key={c.channel_id}>
                           <button
@@ -251,12 +279,27 @@ export default function ServerView({ servers, reload }) {
                           >
                             <Ic className="w-4 h-4 text-cc-muted shrink-0" />
                             <span className="truncate flex-1 text-left">{c.name}</span>
+                            {c.type === "voice" && vps.length > 0 && (
+                              <span className="shrink-0 text-[10px] font-bold bg-cc-success/30 text-cc-success px-1.5 py-0.5 rounded-full" data-testid={`voice-count-${c.channel_id}`}>
+                                {vps.length}
+                              </span>
+                            )}
                             {unreadCount > 0 && !active && (
                               <span className="shrink-0 text-[10px] font-bold bg-cc-accent text-white px-1.5 py-0.5 rounded-full min-w-[18px] text-center" data-testid={`unread-${c.channel_id}`}>
                                 {unreadCount > 99 ? "99+" : unreadCount}
                               </span>
                             )}
                           </button>
+                          {c.type === "voice" && vps.length > 0 && (
+                            <ul className="ml-7 mt-0.5 space-y-0.5" data-testid={`voice-participants-${c.channel_id}`}>
+                              {vps.map((p) => (
+                                <li key={p.user_id} className="flex items-center gap-1.5 px-2 py-0.5 text-xs text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text cursor-pointer" onClick={() => setProfileUserId(p.user_id)}>
+                                  <span className="w-1.5 h-1.5 rounded-full bg-cc-success animate-pulse" />
+                                  <span className="truncate" style={{ color: memberColorMap[p.user_id] || undefined }}>{p.display_name || "Membre"}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
                         </li>
                       );
                     })}
@@ -270,12 +313,26 @@ export default function ServerView({ servers, reload }) {
               {channelsByCat["_uncat"].map((c) => {
                 const Ic = channelIcon(c.type);
                 const active = c.channel_id === channel?.channel_id;
+                const vps = voicePresence[c.channel_id] || [];
                 return (
                   <li key={c.channel_id}>
                     <button onClick={() => goToChannel(c.channel_id)} className={cn("w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors", active ? "bg-cc-surface2 text-cc-text" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text")}>
                       <Ic className="w-4 h-4 text-cc-muted shrink-0" />
-                      <span className="truncate">{c.name}</span>
+                      <span className="truncate flex-1 text-left">{c.name}</span>
+                      {c.type === "voice" && vps.length > 0 && (
+                        <span className="shrink-0 text-[10px] font-bold bg-cc-success/30 text-cc-success px-1.5 py-0.5 rounded-full">{vps.length}</span>
+                      )}
                     </button>
+                    {c.type === "voice" && vps.length > 0 && (
+                      <ul className="ml-7 mt-0.5 space-y-0.5">
+                        {vps.map((p) => (
+                          <li key={p.user_id} className="flex items-center gap-1.5 px-2 py-0.5 text-xs text-cc-subtext hover:text-cc-text cursor-pointer" onClick={() => setProfileUserId(p.user_id)}>
+                            <span className="w-1.5 h-1.5 rounded-full bg-cc-success animate-pulse" />
+                            <span className="truncate" style={{ color: memberColorMap[p.user_id] || undefined }}>{p.display_name || "Membre"}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </li>
                 );
               })}
@@ -326,6 +383,7 @@ export default function ServerView({ servers, reload }) {
               onCreateThread={handleCreateThread}
               onOpenThread={(t, parent) => setActiveThread({ thread: t, parent })}
               onOpenProfile={(uid) => uid && setProfileUserId(uid)}
+              memberColorMap={memberColorMap}
               customEmojiMap={customEmojiMap}
             />
             <MessageComposer
