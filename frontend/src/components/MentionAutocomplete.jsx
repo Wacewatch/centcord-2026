@@ -50,11 +50,9 @@ export default function MentionAutocomplete({ text, cursor, serverId, onPick }) 
     return () => { cancelled = true; };
   }, [trigger, serverId]);
 
-  if (!trigger || items.length === 0) return null;
-
   const pick = (i) => {
     const item = items[i];
-    if (!item) return;
+    if (!item || !trigger) return;
     const before = text.slice(0, trigger.start);
     const after = text.slice(cursor);
     const replaced = before + item.value + ' ' + after;
@@ -75,6 +73,8 @@ export default function MentionAutocomplete({ text, cursor, serverId, onPick }) 
     return () => window.removeEventListener('keydown', handler, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trigger, items, active]);
+
+  if (!trigger || items.length === 0) return null;
 
   return (
     <div className="absolute bottom-full left-0 right-0 mb-1 mx-3 bg-cc-surface1 border border-cc-border cc-brutal-shadow z-30 max-h-64 overflow-y-auto">
