@@ -1136,7 +1136,23 @@ async def get_messages(channel_id: str, before: Optional[str] = None, limit: int
             m["author"] = rumap.get(m["author_id"])
             reply_map[m["message_id"]] = m
     for r in rows:
-        r["author"] = umap.get(r["author_id"])
+        aid = r.get("author_id", "")
+        if aid.startswith("bot:") or r.get("bot_id"):
+            r["author"] = {
+                "user_id": aid,
+                "display_name": r.get("bot_name") or "Bot",
+                "avatar_url": r.get("bot_avatar"),
+                "is_bot": True,
+            }
+        elif aid.startswith("webhook:") or r.get("webhook_id"):
+            r["author"] = {
+                "user_id": aid,
+                "display_name": r.get("webhook_name") or "Webhook",
+                "avatar_url": r.get("webhook_avatar"),
+                "is_webhook": True,
+            }
+        else:
+            r["author"] = umap.get(aid)
         if r.get("poll_id") and r["poll_id"] in polls:
             r["poll"] = polls[r["poll_id"]]
         if r.get("reply_to") and r["reply_to"] in reply_map:
