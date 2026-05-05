@@ -1,0 +1,143 @@
+{
+  "theme": "Dark",
+  "archetype": "4 (Swiss & High-Contrast) - Modified Brutalist Editorial",
+  "app_name": "CentCord",
+  "typography": {
+    "fonts": [
+      {
+        "name": "Outfit",
+        "type": "Display / Headings",
+        "url": "https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap"
+      },
+      {
+        "name": "JetBrains Mono",
+        "type": "Body / UI Text",
+        "url": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap"
+      }
+    ],
+    "hierarchy": {
+      "h1": "text-5xl lg:text-6xl font-extrabold tracking-tighter uppercase font-outfit",
+      "h2": "text-3xl lg:text-4xl font-bold tracking-tight font-outfit",
+      "h3": "text-xl font-semibold tracking-tight font-outfit",
+      "body": "text-sm text-zinc-300 font-jetbrains leading-relaxed",
+      "ui_label": "text-xs font-bold tracking-widest uppercase text-zinc-500 font-jetbrains",
+      "chat_message": "text-[14px] text-zinc-100 font-jetbrains leading-[1.6]"
+    }
+  },
+  "colors": {
+    "background": {
+      "base": "#050505",
+      "surface_1": "#0E0E11",
+      "surface_2": "#18181B",
+      "glass": "bg-black/60 backdrop-blur-2xl"
+    },
+    "border": {
+      "subtle": "#27272A",
+      "focus": "#FF3B00"
+    },
+    "text": {
+      "primary": "#F2F2F2",
+      "secondary": "#A1A1AA",
+      "muted": "#52525B"
+    },
+    "accent": {
+      "primary": "#FF3B00",
+      "primary_hover": "#FF5722",
+      "glow": "drop-shadow-[0_0_12px_rgba(255,59,0,0.5)]",
+      "success": "#10B981",
+      "danger": "#EF4444"
+    }
+  },
+  "layout_and_spacing": {
+    "spacing_scale": "Tailwind standard, but padded generously. Chat uses dense typography but generous container padding (p-6, p-8).",
+    "architecture": {
+      "auth_page": "Asymmetric split layout. Left 40% dense brutalist form. Right 60% cinematic image overlay with noise texture.",
+      "main_app_grid": "3 or 4-column fluid layout.",
+      "columns": {
+        "server_rail": "w-20 bg-[#050505] flex flex-col gap-4 py-6 items-center border-r border-[#27272A]",
+        "channel_sidebar": "w-64 bg-[#0E0E11] flex flex-col border-r border-[#27272A]",
+        "main_chat": "flex-1 bg-[#18181B] flex flex-col relative",
+        "members_sidebar": "w-72 bg-[#0E0E11] border-l border-[#27272A] hidden xl:flex flex-col"
+      }
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-[#FF3B00] text-white rounded-none font-bold tracking-wide uppercase px-6 py-3 hover:bg-[#FF5722] transition-colors shadow-[4px_4px_0px_#27272A] hover:shadow-[2px_2px_0px_#27272A] hover:translate-x-[2px] hover:translate-y-[2px]",
+      "secondary": "bg-transparent border border-[#27272A] text-[#F2F2F2] rounded-none px-6 py-3 hover:bg-[#18181B] transition-colors",
+      "icon": "hover:bg-[#18181B] rounded-md p-2 transition-colors text-[#A1A1AA] hover:text-[#F2F2F2]"
+    },
+    "inputs": {
+      "chat_composer": "bg-[#0E0E11] border border-[#27272A] rounded-sm px-4 py-3 font-jetbrains text-sm focus:border-[#FF3B00] focus:ring-1 focus:ring-[#FF3B00] outline-none transition-all",
+      "standard": "bg-transparent border-b border-[#27272A] rounded-none px-0 py-2 focus:border-[#FF3B00] outline-none transition-colors"
+    },
+    "chat_message": {
+      "container": "group flex gap-4 px-6 py-2 hover:bg-[#0E0E11]/50 transition-colors relative",
+      "avatar": "w-10 h-10 rounded-sm bg-[#18181B] overflow-hidden",
+      "header": "flex items-baseline gap-2 mb-1",
+      "username": "font-bold font-outfit text-[#FF3B00]",
+      "timestamp": "text-xs text-[#52525B] font-jetbrains",
+      "actions": "absolute right-4 top-2 opacity-0 group-hover:opacity-100 bg-[#18181B] border border-[#27272A] rounded-md flex"
+    },
+    "channel_item": {
+      "container": "flex items-center gap-2 px-4 py-2 mx-2 rounded-sm text-[#A1A1AA] hover:bg-[#18181B] hover:text-[#F2F2F2] transition-colors cursor-pointer",
+      "active": "bg-[#18181B] text-[#F2F2F2]",
+      "icon": "w-4 h-4"
+    },
+    "server_icon": {
+      "base": "w-12 h-12 rounded-xl bg-[#18181B] flex items-center justify-center font-bold text-lg text-[#F2F2F2] cursor-pointer transition-all hover:rounded-sm hover:bg-[#FF3B00] hover:text-white border border-[#27272A] shadow-lg",
+      "active": "rounded-sm bg-[#FF3B00] text-white border-transparent"
+    },
+    "modal": {
+      "overlay": "fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center",
+      "content": "bg-[#0E0E11] border border-[#27272A] w-full max-w-md p-8 shadow-2xl relative"
+    }
+  },
+  "motion_and_interactions": {
+    "hover_states": "Crisp and immediate. Chat messages highlight subtly. Buttons press down physically (Brutalist shadow reduction).",
+    "transitions": "Use Framer Motion for modal pop-ups (scale 0.95 -> 1, opacity 0 -> 1, duration 0.2s easeOut).",
+    "rail_icons": "Spring scale on hover (scale: 1.1, stiffness: 400, damping: 17)."
+  },
+  "media_and_assets": {
+    "icons_library": "lucide-react",
+    "image_urls": [
+      {
+        "category": "auth_hero",
+        "description": "Cinematic dark abstract texture with molten orange accents for the authentication page background",
+        "url": "https://static.prod-images.emergentagent.com/jobs/a5c2efcc-de7a-4769-b97b-5f02393024a7/images/93de6890741f329a6c03ab059fbad0b4325d61e957e4cae8da90ea78e9fd9274.png"
+      },
+      {
+        "category": "avatar_1",
+        "description": "Moody portrait of a man looking down",
+        "url": "https://images.unsplash.com/photo-1662838496399-f8e312b566fc?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MTN8MHwxfHNlYXJjaHw0fHxwb3J0cmFpdCUyMGZhY2UlMjBkYXJrJTIwYmFja2dyb3VuZCUyMG1vb2R5fGVufDB8fHx8MTc3ODAwNDU0M3ww&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "avatar_2",
+        "description": "Moody portrait of a boy looking up",
+        "url": "https://images.unsplash.com/photo-1662838496660-61af6ffa3788?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MTN8MHwxfHNlYXJjaHwzfHxwb3J0cmFpdCUyMGZhY2UlMjBkYXJrJTIwYmFja2dyb3VuZCUyMG1vb2R5fGVufDB8fHx8MTc3ODAwNDU0M3ww&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "avatar_3",
+        "description": "Moody portrait of a man standing in the dark with a serious look",
+        "url": "https://images.unsplash.com/photo-1712153483492-cab99d90ca71?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MTN8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMGZhY2UlMjBkYXJrJTIwYmFja2dyb3VuZCUyMG1vb2R5fGVufDB8fHx8MTc3ODAwNDU0M3ww&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "avatar_4",
+        "description": "Moody portrait of a man with a hat",
+        "url": "https://images.unsplash.com/photo-1668536681484-6dd1dd3d6809?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MTN8MHwxfHNlYXJjaHwyfHxwb3J0cmFpdCUyMGZhY2UlMjBkYXJrJTIwYmFja2dyb3VuZCUyMG1vb2R5fGVufDB8fHx8MTc3ODAwNDU0M3ww&ixlib=rb-4.1.0&q=85"
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the color hex codes in this guideline, do not use default Tailwind slates/grays. We are using custom tinted deep blacks (#050505, #0E0E11, #18181B) to simulate a premium editorial environment.",
+    "Do NOT use typical Discord UI styling (no Blurple, no full circles for servers). Use sharp edges, square/slightly rounded shapes (rounded-sm or rounded-none) for a brutalist feel.",
+    "All interactive elements must have the 'data-testid' attribute for testing.",
+    "Implement the Layout architecture strictly using Tailwind flexbox/grid.",
+    "Use JetBrains Mono for all body text, UI labels, and chat messages to give it a precise, developer-focused, technical feel. Import this font via index.css and extend it in Tailwind configuration.",
+    "Use Outfit for large headings, app brand, and usernames to inject high fashion/editorial contrast. Import this via index.css.",
+    "No generic full-screen gradients. Apply the noise/grain via CSS or transparent overlay on top of the hero image.",
+    "Use framer-motion for smooth micro-interactions on the server rail and modal states.",
+    "For Server Icons, if no image is provided, use CSS to render a stylized text initials avatar (e.g., 'C') with a dark base and orange border on hover.",
+    "Use .js files for React components as required."
+  ]
+}
