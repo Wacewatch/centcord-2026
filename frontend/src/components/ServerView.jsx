@@ -9,6 +9,7 @@ import MessageComposer from "./MessageComposer";
 import MembersSidebar from "./MembersSidebar";
 import NotificationsPanel from "./NotificationsPanel";
 import ServerSettingsModal from "./modals/ServerSettingsModal";
+import CreateChannelModal from "./modals/CreateChannelModal";
 import PinModal from "./PinModal";
 import SearchModal from "./SearchModal";
 import ThreadPanel from "./ThreadPanel";
@@ -34,6 +35,7 @@ export default function ServerView({ servers, reload }) {
   const [showMembers, setShowMembers] = useState(true);
   const [collapsedCats, setCollapsedCats] = useState({});
   const [openSettings, setOpenSettings] = useState(false);
+  const [openCreateChannel, setOpenCreateChannel] = useState(null); // null | { categoryId }
   const [openPins, setOpenPins] = useState(false);
   const [openSearch, setOpenSearch] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
@@ -116,14 +118,8 @@ export default function ServerView({ servers, reload }) {
     catch (_) { toast.error("Échec de l'envoi"); }
   };
 
-  const createChannel = async () => {
-    const name = prompt("Nom du salon ?");
-    if (!name) return;
-    const type = prompt("Type ? (text / voice / announcement)", "text") || "text";
-    try {
-      await api.post(`/servers/${serverId}/channels`, { name, type });
-      await loadServer();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Échec de création du salon"); }
+  const createChannel = (categoryId = null) => {
+    setOpenCreateChannel({ categoryId });
   };
 
   const handleCreateThread = async (parentMsg) => {
@@ -151,7 +147,7 @@ export default function ServerView({ servers, reload }) {
               <div key={cat.category_id}>
                 <button onClick={() => setCollapsedCats({ ...collapsedCats, [cat.category_id]: !collapsed })} className="w-full px-2 flex items-center justify-between text-[10px] uppercase tracking-[0.25em] font-bold text-cc-muted hover:text-cc-text">
                   <span className="flex items-center gap-1">{collapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />} {cat.name}</span>
-                  <Plus onClick={(e) => { e.stopPropagation(); createChannel(); }} className="w-3 h-3 hover:text-cc-accent" />
+                  <Plus onClick={(e) => { e.stopPropagation(); createChannel(cat.category_id); }} className="w-3 h-3 hover:text-cc-accent" />
                 </button>
                 {!collapsed && (
                   <ul className="mt-1 space-y-0.5">
@@ -247,6 +243,7 @@ export default function ServerView({ servers, reload }) {
       {activeThread && <ThreadPanel thread={activeThread.thread} parentMessage={activeThread.parent} onClose={() => setActiveThread(null)} />}
       {showMembers && !activeThread && <MembersSidebar members={members} server={server} reload={loadMembers} />}
       {openSettings && <ServerSettingsModal server={server} reload={() => { loadServer(); reload && reload(); }} onClose={() => setOpenSettings(false)} />}
+      {openCreateChannel && <CreateChannelModal serverId={serverId} categories={server.categories || []} defaultCategoryId={openCreateChannel.categoryId} onClose={() => setOpenCreateChannel(null)} onCreated={() => loadServer()} />}
       {openPins && channel && <PinModal channelId={channel.channel_id} onClose={() => setOpenPins(false)} />}
       {openSearch && <SearchModal serverId={serverId} onClose={() => setOpenSearch(false)} />}
     </>
