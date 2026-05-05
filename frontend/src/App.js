@@ -4,10 +4,21 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from
 import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { WSProvider } from "./lib/ws";
+import { ThemeProvider, useTheme } from "./lib/theme";
 import LandingPage from "./pages/LandingPage";
 import LegalPage from "./pages/LegalPage";
 import AuthPage from "./pages/AuthPage";
 import AppLayout from "./pages/AppLayout";
+
+// Register service worker once at boot
+function registerSW() {
+  if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
+  if (window.location.hostname === "localhost" && window.location.protocol !== "https:") return;
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  });
+}
+registerSW();
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -71,12 +82,19 @@ function AppRouter() {
 export default function App() {
   return (
     <div className="App">
-      <AuthProvider>
-        <BrowserRouter>
-          <AppRouter />
-          <Toaster theme="dark" position="top-right" richColors />
-        </BrowserRouter>
-      </AuthProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <BrowserRouter>
+            <AppRouter />
+            <ToasterThemed />
+          </BrowserRouter>
+        </AuthProvider>
+      </ThemeProvider>
     </div>
   );
+}
+
+function ToasterThemed() {
+  const { theme } = useTheme();
+  return <Toaster theme={theme === "light" ? "light" : "dark"} position="top-right" richColors />;
 }

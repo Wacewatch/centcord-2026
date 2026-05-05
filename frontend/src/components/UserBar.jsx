@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useAuth } from "../lib/auth";
 import { initials, presenceColor } from "../lib/utils";
-import { Settings as SettingsIcon, LogOut, Edit2, Check, X } from "lucide-react";
+import { Settings as SettingsIcon, LogOut, Edit2, Check, X, Sun, Moon } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import api from "../lib/api";
 import { toast } from "sonner";
+import { useTheme } from "../lib/theme";
 
 /**
  * Clean, refined bottom-left user bar.
@@ -14,6 +15,7 @@ import { toast } from "sonner";
 export default function UserBar() {
   const { user, logout, refreshUser } = useAuth();
   const navigate = useNavigate();
+  const { theme, toggle } = useTheme();
   const [editing, setEditing] = useState(false);
   const [customStatus, setCustomStatus] = useState(user?.custom_status || "");
   const inputRef = useRef(null);
@@ -94,6 +96,15 @@ export default function UserBar() {
 
       {/* Actions cluster */}
       <div className="flex items-center gap-0.5 px-1.5 border-l border-cc-border/60">
+        <button
+          data-testid="userbar-theme"
+          onClick={toggle}
+          className="p-2 rounded-md text-cc-subtext hover:text-cc-accent hover:bg-cc-base transition-colors"
+          title={theme === "dark" ? "Mode clair" : "Mode sombre"}
+          aria-label="Changer de thème"
+        >
+          {theme === "dark" ? <Sun className="w-[18px] h-[18px]" /> : <Moon className="w-[18px] h-[18px]" />}
+        </button>
         <button
           data-testid="userbar-settings"
           onClick={() => navigate("/app/settings")}

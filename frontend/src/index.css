@@ -263,3 +263,70 @@ h1, h2, h3, h4, .font-display { font-family: "Outfit", system-ui, sans-serif; le
 @supports (padding: env(safe-area-inset-bottom)) {
   .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
 }
+
+/* ============ SKELETONS ============ */
+.cc-skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgba(40,40,46,0.5);
+  border-radius: 4px;
+}
+.cc-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
+  animation: ccShimmer 1.4s linear infinite;
+}
+@keyframes ccShimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* ============ DRAG & DROP ============ */
+.cc-drag-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 59, 0, 0.10);
+  border: 3px dashed #FF3B00;
+  pointer-events: none;
+  font-family: "Outfit", sans-serif;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+  color: #FFB199;
+  font-size: 1.3rem;
+}
+
+/* ============ THEME : LIGHT MODE ============ */
+:root.cc-light, html.cc-light, html[data-theme="light"] {
+  --background: 0 0% 96%;
+  --foreground: 240 10% 8%;
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 8%;
+  --secondary: 240 5% 92%;
+  --muted: 240 5% 88%;
+  --muted-foreground: 240 5% 35%;
+  --border: 240 5% 84%;
+  --input: 240 5% 84%;
+}
+html.cc-light, html[data-theme="light"] body {
+  background: #F6F6F8 !important;
+  color: #14141A !important;
+  background-image:
+    radial-gradient(ellipse 80% 60% at 12% 0%, rgba(255, 59, 0, 0.10), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 88% 100%, rgba(255, 122, 77, 0.07), transparent 65%) !important;
+}
+html.cc-light .bg-cc-base, html[data-theme="light"] .bg-cc-base { background-color: #FFFFFF !important; }
+html.cc-light .bg-cc-surface1, html[data-theme="light"] .bg-cc-surface1 { background-color: #F1F1F4 !important; }
+html.cc-light .bg-cc-surface2, html[data-theme="light"] .bg-cc-surface2 { background-color: #E8E8EC !important; }
+html.cc-light .text-cc-text, html[data-theme="light"] .text-cc-text { color: #14141A !important; }
+html.cc-light .text-cc-subtext, html[data-theme="light"] .text-cc-subtext { color: #4A4A55 !important; }
+html.cc-light .text-cc-muted, html[data-theme="light"] .text-cc-muted { color: #6E6E78 !important; }
+html.cc-light .border-cc-border, html[data-theme="light"] .border-cc-border { border-color: #D5D5DC !important; }
+html.cc-light ::-webkit-scrollbar-thumb, html[data-theme="light"] ::-webkit-scrollbar-thumb { background: #C2C2CC; }
+html.cc-light .cc-skeleton, html[data-theme="light"] .cc-skeleton { background: rgba(120,120,135,0.18); }
+html.cc-light .cc-input, html[data-theme="light"] .cc-input { background: #FFFFFF; color: #14141A; border-color: #D5D5DC; }
+html.cc-light .cc-msg-row:hover, html[data-theme="light"] .cc-msg-row:hover { background: rgba(255, 59, 0, 0.05); }
+html.cc-light body::before, html[data-theme="light"] body::before { opacity: 0.04; mix-blend-mode: multiply; }

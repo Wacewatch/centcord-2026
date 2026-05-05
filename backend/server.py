@@ -1362,6 +1362,10 @@ async def send_message(channel_id: str, payload: SendMessageIn, user: dict = Dep
         raise HTTPException(status_code=403, detail="Channel is locked")
     if not rate_limit(f"msg:{user['user_id']}", 30, 10):
         raise HTTPException(status_code=429, detail="Slow down")
+    # Auto-mod check
+    automod_reason = await apply_automod(ch["server_id"], user, payload.content)
+    if automod_reason:
+        raise HTTPException(status_code=422, detail=f"Message bloqué par l'auto-modération ({automod_reason})")
     msg = {
         "message_id": gen_id("msg"),
         "channel_id": channel_id, "server_id": ch["server_id"],
@@ -2184,6 +2188,7 @@ async def boost_server(server_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=409, detail="Vous boostez déjà ce serveur")
     await db.boosts.insert_one({"boost_id": gen_id("bst"), "server_id": server_id, "user_id": user["user_id"], "since": now_iso()})
     await db.servers.update_one({"server_id": server_id}, {"$inc": {"boost_count": 1}})
+    await grant_boost_rewards(server_id, user["user_id"])
     await hub.broadcast_server(server_id, "server.boost", {"user_id": user["user_id"]})
     return {"ok": True}
 
@@ -2192,6 +2197,7 @@ async def unboost_server(server_id: str, user: dict = Depends(get_current_user))
     res = await db.boosts.delete_one({"server_id": server_id, "user_id": user["user_id"]})
     if res.deleted_count:
         await db.servers.update_one({"server_id": server_id}, {"$inc": {"boost_count": -1}})
+        await revoke_boost_rewards(server_id, user["user_id"])
     return {"ok": True}
 
 # ========== Mute / Timeout ==========
@@ -2602,6 +2608,313 @@ async def discover_by_tag(tag: str, user: dict = Depends(get_current_user)):
         s["member_count"] = await db.members.count_documents({"server_id": s["server_id"]})
     return servers
 
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  PHASE 2026-05  ✦  E2E keys, Auto-mod, Boost rewards, Music queue, Video  ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+# ───── 1. PHP-parity: key.publish / key.get  (E2E pubkey exchange) ─────────
+class PublishKeyIn(BaseModel):
+    public_key: str = Field(min_length=10, max_length=4000)  # JWK serialized as JSON string
+
+@api.post("/users/me/keys")
+async def publish_public_key(payload: PublishKeyIn, user: dict = Depends(get_current_user)):
+    """Publish ECDH public key (JWK string) for E2E DM encryption."""
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"public_key": payload.public_key, "key_published_at": now_iso()}}
+    )
+    return {"ok": True}
+
+@api.get("/users/{user_id}/keys")
+async def get_public_key(user_id: str, user: dict = Depends(get_current_user)):
+    """Fetch another user's published public key."""
+    u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "public_key": 1, "key_published_at": 1})
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"user_id": user_id, "public_key": u.get("public_key"), "published_at": u.get("key_published_at")}
+
+
+# ───── 2. AUTO-MOD (regex / keyword filter) ─────────────────────────────────
+DEFAULT_AUTOMOD = {
+    "enabled": False,
+    "action": "delete",         # 'warn' | 'delete' | 'timeout'
+    "timeout_minutes": 10,
+    "words": [],                # list of forbidden lowercase words/phrases
+    "block_invites": False,     # block discord/centcord invites
+    "block_links": False,       # block all http(s) links
+}
+
+import re as _re_global
+
+def _automod_violation(automod: dict, content: str) -> Optional[str]:
+    """Returns a reason string if content violates rules, else None."""
+    if not automod or not automod.get("enabled"):
+        return None
+    text = (content or "").lower()
+    # forbidden words
+    for w in automod.get("words", []):
+        if not w:
+            continue
+        if w.lower() in text:
+            return f"mot interdit: {w}"
+    # invites
+    if automod.get("block_invites"):
+        if _re_global.search(r"(discord\.gg/|discord\.com/invite/|centcord\.app/i/)", text):
+            return "invitation interdite"
+    # all links
+    if automod.get("block_links"):
+        if _re_global.search(r"https?://", text):
+            return "lien interdit"
+    return None
+
+async def apply_automod(server_id: str, user: dict, content: str) -> Optional[str]:
+    """Returns violation reason if content blocked, else None. Applies side-effects (timeout)."""
+    server = await db.servers.find_one({"server_id": server_id}, {"_id": 0, "auto_mod": 1, "owner_id": 1})
+    if not server:
+        return None
+    # Owner / admin bypass
+    if server.get("owner_id") == user["user_id"] or user.get("role") == "admin":
+        return None
+    perms = await member_perms(server_id, user["user_id"])
+    if perms & PERM_MANAGE_MESSAGES or perms & PERM_ADMINISTRATOR:
+        return None
+    automod = server.get("auto_mod") or DEFAULT_AUTOMOD
+    reason = _automod_violation(automod, content)
+    if not reason:
+        return None
+    action = automod.get("action", "delete")
+    if action == "timeout":
+        until = (now_utc() + timedelta(minutes=int(automod.get("timeout_minutes") or 10))).isoformat()
+        await db.members.update_one(
+            {"server_id": server_id, "user_id": user["user_id"]},
+            {"$set": {"timeout_until": until, "timeout_reason": f"automod: {reason}"}}
+        )
+        await hub.broadcast_server(server_id, "member.timeout", {"user_id": user["user_id"], "until": until})
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id,
+        "actor_id": "system:automod", "target_id": user["user_id"],
+        "action": "automod.block", "data": {"reason": reason, "action": action, "preview": (content or "")[:120]},
+        "at": now_iso()
+    })
+    return reason
+
+class AutoModIn(BaseModel):
+    enabled: Optional[bool] = None
+    action: Optional[str] = Field(None, pattern="^(warn|delete|timeout)$")
+    timeout_minutes: Optional[int] = Field(None, ge=1, le=10080)
+    words: Optional[List[str]] = None
+    block_invites: Optional[bool] = None
+    block_links: Optional[bool] = None
+
+@api.get("/servers/{server_id}/automod")
+async def get_automod(server_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    s = await db.servers.find_one({"server_id": server_id}, {"_id": 0, "auto_mod": 1})
+    return s.get("auto_mod") or DEFAULT_AUTOMOD
+
+@api.put("/servers/{server_id}/automod")
+async def set_automod(server_id: str, payload: AutoModIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    current = (await db.servers.find_one({"server_id": server_id}, {"_id": 0, "auto_mod": 1})).get("auto_mod") or DEFAULT_AUTOMOD
+    update = {**current, **{k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}}
+    # sanitize words
+    if "words" in update and update["words"]:
+        clean = []
+        for w in update["words"]:
+            w = (w or "").strip().lower()
+            if 1 <= len(w) <= 64:
+                clean.append(w)
+        update["words"] = clean[:200]
+    await db.servers.update_one({"server_id": server_id}, {"$set": {"auto_mod": update}})
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
+        "action": "automod.update", "data": {"automod": update}, "at": now_iso()
+    })
+    return update
+
+
+# ───── 3. BOOST REWARDS  (auto Booster role + slot bonuses) ────────────────
+BOOSTER_ROLE_NAME = "Booster"
+EMOJI_BONUS_PER_BOOST = 25
+STICKER_BONUS_PER_BOOST = 25
+
+async def _ensure_booster_role(server_id: str) -> str:
+    role = await db.roles.find_one({"server_id": server_id, "name": BOOSTER_ROLE_NAME}, {"_id": 0})
+    if role:
+        return role["role_id"]
+    role_id = gen_id("role")
+    await db.roles.insert_one({
+        "role_id": role_id, "server_id": server_id,
+        "name": BOOSTER_ROLE_NAME, "color": "#FF3B00",
+        "permissions": DEFAULT_PERMS, "position": 1, "mentionable": False,
+        "is_default": False, "is_booster": True, "created_at": now_iso(),
+    })
+    return role_id
+
+async def grant_boost_rewards(server_id: str, user_id: str):
+    """Assign Booster role + bump emoji/sticker limits."""
+    role_id = await _ensure_booster_role(server_id)
+    member = await db.members.find_one({"server_id": server_id, "user_id": user_id}, {"_id": 0})
+    if member:
+        roles = list(set(member.get("role_ids") or []) | {role_id})
+        await db.members.update_one(
+            {"server_id": server_id, "user_id": user_id},
+            {"$set": {"role_ids": roles}}
+        )
+    # Bump server limits (emoji_limit, sticker_limit) — additive cap of total boosts * bonus
+    boost_count = await db.boosts.count_documents({"server_id": server_id})
+    new_emoji = 50 + boost_count * EMOJI_BONUS_PER_BOOST
+    new_sticker = 50 + boost_count * STICKER_BONUS_PER_BOOST
+    await db.servers.update_one({"server_id": server_id}, {"$set": {
+        "emoji_limit": new_emoji, "sticker_limit": new_sticker, "boost_count": boost_count
+    }})
+    await hub.broadcast_server(server_id, "server.boost.reward", {
+        "user_id": user_id, "boost_count": boost_count,
+        "emoji_limit": new_emoji, "sticker_limit": new_sticker
+    })
+
+async def revoke_boost_rewards(server_id: str, user_id: str):
+    """If user has 0 remaining boosts here → remove Booster role. Recalc limits."""
+    if await db.boosts.count_documents({"server_id": server_id, "user_id": user_id}) == 0:
+        booster = await db.roles.find_one({"server_id": server_id, "name": BOOSTER_ROLE_NAME}, {"_id": 0, "role_id": 1})
+        if booster:
+            member = await db.members.find_one({"server_id": server_id, "user_id": user_id}, {"_id": 0})
+            if member and booster["role_id"] in (member.get("role_ids") or []):
+                roles = [r for r in member["role_ids"] if r != booster["role_id"]]
+                await db.members.update_one(
+                    {"server_id": server_id, "user_id": user_id},
+                    {"$set": {"role_ids": roles}}
+                )
+    boost_count = await db.boosts.count_documents({"server_id": server_id})
+    new_emoji = 50 + boost_count * EMOJI_BONUS_PER_BOOST
+    new_sticker = 50 + boost_count * STICKER_BONUS_PER_BOOST
+    await db.servers.update_one({"server_id": server_id}, {"$set": {
+        "emoji_limit": new_emoji, "sticker_limit": new_sticker, "boost_count": boost_count
+    }})
+
+
+# ───── 4. MUSIC QUEUE  (YouTube only) ──────────────────────────────────────
+# In-memory store: { channel_id: { queue: [tracks], current_idx: int, playing: bool, position_at_iso: str } }
+MUSIC_STATE: Dict[str, Dict[str, Any]] = {}
+
+YOUTUBE_RE = _re_global.compile(r"(?:youtu\.be/|youtube\.com/(?:watch\?v=|shorts/|embed/|v/))([A-Za-z0-9_-]{11})")
+
+def _yt_id(url: str) -> Optional[str]:
+    if not url:
+        return None
+    m = YOUTUBE_RE.search(url)
+    if m:
+        return m.group(1)
+    if _re_global.fullmatch(r"[A-Za-z0-9_-]{11}", url):
+        return url
+    return None
+
+class MusicAddIn(BaseModel):
+    url: str = Field(min_length=1, max_length=400)
+    title: Optional[str] = Field(None, max_length=200)
+
+async def _broadcast_music(server_id: str, channel_id: str):
+    state = MUSIC_STATE.get(channel_id) or {"queue": [], "current_idx": -1, "playing": False}
+    await hub.broadcast_server(server_id, "music.update", {"channel_id": channel_id, **state})
+
+@api.get("/voice/channels/{channel_id}/queue")
+async def music_queue_get(channel_id: str, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    await require_membership(ch["server_id"], user, PERM_VIEW)
+    return MUSIC_STATE.get(channel_id) or {"queue": [], "current_idx": -1, "playing": False}
+
+@api.post("/voice/channels/{channel_id}/queue")
+async def music_queue_add(channel_id: str, payload: MusicAddIn, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    await require_membership(ch["server_id"], user, PERM_SEND)
+    if ch.get("type") != "voice":
+        raise HTTPException(status_code=400, detail="Pas un salon vocal")
+    yid = _yt_id(payload.url.strip())
+    if not yid:
+        raise HTTPException(status_code=400, detail="URL YouTube invalide")
+    state = MUSIC_STATE.setdefault(channel_id, {"queue": [], "current_idx": -1, "playing": False})
+    track = {
+        "track_id": gen_id("trk"),
+        "yt_id": yid,
+        "title": payload.title or f"YouTube · {yid}",
+        "url": f"https://www.youtube.com/watch?v={yid}",
+        "thumbnail": f"https://i.ytimg.com/vi/{yid}/hqdefault.jpg",
+        "added_by": user["user_id"], "added_by_name": user.get("display_name"),
+        "added_at": now_iso(),
+    }
+    state["queue"].append(track)
+    if state["current_idx"] < 0 and len(state["queue"]) == 1:
+        state["current_idx"] = 0
+        state["playing"] = True
+        state["position_at_iso"] = now_iso()
+    await _broadcast_music(ch["server_id"], channel_id)
+    return track
+
+@api.delete("/voice/channels/{channel_id}/queue/{track_id}")
+async def music_queue_remove(channel_id: str, track_id: str, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    await require_membership(ch["server_id"], user)
+    state = MUSIC_STATE.get(channel_id)
+    if not state:
+        return {"ok": True}
+    new_q = []
+    removed_idx = -1
+    for i, t in enumerate(state["queue"]):
+        if t["track_id"] == track_id:
+            removed_idx = i
+            continue
+        new_q.append(t)
+    state["queue"] = new_q
+    # adjust current_idx
+    if removed_idx >= 0 and removed_idx <= state["current_idx"]:
+        state["current_idx"] = max(-1, state["current_idx"] - 1)
+    if state["current_idx"] >= len(state["queue"]):
+        state["current_idx"] = -1
+        state["playing"] = False
+    await _broadcast_music(ch["server_id"], channel_id)
+    return {"ok": True}
+
+@api.post("/voice/channels/{channel_id}/queue/skip")
+async def music_skip(channel_id: str, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    await require_membership(ch["server_id"], user)
+    state = MUSIC_STATE.setdefault(channel_id, {"queue": [], "current_idx": -1, "playing": False})
+    if state["current_idx"] + 1 < len(state["queue"]):
+        state["current_idx"] += 1
+        state["playing"] = True
+        state["position_at_iso"] = now_iso()
+    else:
+        state["current_idx"] = -1
+        state["playing"] = False
+    await _broadcast_music(ch["server_id"], channel_id)
+    return state
+
+class MusicPlayIn(BaseModel):
+    playing: bool
+
+@api.post("/voice/channels/{channel_id}/queue/play")
+async def music_play_pause(channel_id: str, payload: MusicPlayIn, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    await require_membership(ch["server_id"], user)
+    state = MUSIC_STATE.setdefault(channel_id, {"queue": [], "current_idx": -1, "playing": False})
+    state["playing"] = bool(payload.playing)
+    state["position_at_iso"] = now_iso()
+    await _broadcast_music(ch["server_id"], channel_id)
+    return state
+
+
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 # ========== Politique légale ==========
 @api.get("/legal/policy")

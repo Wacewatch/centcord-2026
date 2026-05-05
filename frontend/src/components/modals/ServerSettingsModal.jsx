@@ -17,6 +17,7 @@ const TABS = [
   { id: "stickers", label: "Stickers" },
   { id: "webhooks", label: "Webhooks" },
   { id: "bots", label: "Bots" },
+  { id: "automod", label: "Auto-mod" },
   { id: "mention-perms", label: "Mentions" },
   { id: "bans", label: "Bannissements" },
   { id: "audit", label: "Journal d'audit" },
@@ -53,6 +54,9 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
   const [bots, setBots] = useState([]);
   const [newBot, setNewBot] = useState({ name: "", description: "", avatar_url: "" });
   const [revealedTokens, setRevealedTokens] = useState({}); // {bot_id: true}
+  // Auto-mod
+  const [automod, setAutomod] = useState(null);
+  const [automodWordsInput, setAutomodWordsInput] = useState("");
   // Delete confirmation
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const isOwner = server.owner_id === user?.user_id;
@@ -66,6 +70,10 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
     if (tab === "stats") api.get(`/servers/${server.server_id}/stats`).then(r => setStats(r.data)).catch(() => {});
     if (tab === "stickers") api.get(`/servers/${server.server_id}/stickers`).then(r => setStickers(r.data)).catch(() => {});
     if (tab === "bots") api.get(`/servers/${server.server_id}/bots`).then(r => setBots(r.data)).catch(() => {});
+    if (tab === "automod") api.get(`/servers/${server.server_id}/automod`).then(r => {
+      setAutomod(r.data);
+      setAutomodWordsInput((r.data?.words || []).join(", "));
+    }).catch(() => {});
   }, [tab, server.server_id]);
 
   const save = async () => {
@@ -637,6 +645,68 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
                 })}
                 {bots.length === 0 && <li className="text-cc-muted text-xs uppercase tracking-widest">Aucun bot. {isOwner && "Créez-en un ci-dessus."}</li>}
               </ul>
+            </div>
+          )}
+          {tab === "automod" && (
+            <div className="space-y-4 max-w-2xl">
+              <p className="text-xs text-cc-muted uppercase tracking-widest">Filtre regex/mots-clés appliqué à tous les nouveaux messages. Les rôles avec <strong>Gérer les messages</strong> sont exemptés.</p>
+              {!automod ? (
+                <div className="text-cc-muted text-xs">Chargement…</div>
+              ) : (
+                <>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!automod.enabled} onChange={(e) => setAutomod({ ...automod, enabled: e.target.checked })} />
+                    <span className="text-sm font-bold uppercase tracking-widest">Activer l'auto-modération</span>
+                  </label>
+                  <div>
+                    <label className="text-xs uppercase tracking-widest text-cc-muted block mb-1">Action sur violation</label>
+                    <select value={automod.action} onChange={(e) => setAutomod({ ...automod, action: e.target.value })} className="bg-cc-surface2 border border-cc-border px-3 py-2 text-sm">
+                      <option value="warn">Avertissement (laisse passer)</option>
+                      <option value="delete">Bloquer le message</option>
+                      <option value="timeout">Bloquer + timeout l'auteur</option>
+                    </select>
+                  </div>
+                  {automod.action === "timeout" && (
+                    <div>
+                      <label className="text-xs uppercase tracking-widest text-cc-muted block mb-1">Durée du timeout (minutes)</label>
+                      <input type="number" min={1} max={10080} value={automod.timeout_minutes || 10} onChange={(e) => setAutomod({ ...automod, timeout_minutes: Math.max(1, parseInt(e.target.value || "10", 10)) })} className="bg-cc-surface2 border border-cc-border px-3 py-2 text-sm w-32" />
+                    </div>
+                  )}
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!automod.block_invites} onChange={(e) => setAutomod({ ...automod, block_invites: e.target.checked })} />
+                    <span className="text-sm">Bloquer les liens d'invitation (Discord, CentCord)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!automod.block_links} onChange={(e) => setAutomod({ ...automod, block_links: e.target.checked })} />
+                    <span className="text-sm">Bloquer tous les liens http(s)</span>
+                  </label>
+                  <div>
+                    <label className="text-xs uppercase tracking-widest text-cc-muted block mb-1">Mots/phrases interdits (séparés par virgules, max 200)</label>
+                    <textarea
+                      value={automodWordsInput}
+                      onChange={(e) => setAutomodWordsInput(e.target.value)}
+                      placeholder="ex: spam, arnaque, mot-honteux"
+                      rows={4}
+                      className="w-full bg-cc-surface2 border border-cc-border px-3 py-2 text-sm font-jetbrains"
+                    />
+                    <div className="text-[10px] text-cc-muted mt-1 uppercase tracking-widest">Insensible à la casse · sous-chaîne</div>
+                  </div>
+                  <div className="flex gap-2 pt-2 border-t border-cc-border">
+                    <button
+                      onClick={async () => {
+                        const words = automodWordsInput.split(",").map((w) => w.trim()).filter(Boolean);
+                        try {
+                          const { data } = await api.put(`/servers/${server.server_id}/automod`, { ...automod, words });
+                          setAutomod(data);
+                          setAutomodWordsInput((data.words || []).join(", "));
+                          toast.success("Auto-mod enregistrée");
+                        } catch (e) { toast.error("Échec de l'enregistrement"); }
+                      }}
+                      className="bg-cc-accent text-white px-4 py-2 text-xs font-bold uppercase tracking-widest cc-brutal-shadow cc-brutal-press"
+                    >Enregistrer</button>
+                  </div>
+                </>
+              )}
             </div>
           )}
           {tab === "bans" && (

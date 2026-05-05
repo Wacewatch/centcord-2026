@@ -689,15 +689,16 @@ agent_communication:
 
 ### metadata:
   created_by: "main_agent"
-  version: "1.2"
-  test_sequence: 3
+  version: "1.3"
+  test_sequence: 4
   run_ui: false
 
 ### test_plan:
   current_focus:
-    - "Bot system (CRUD + message sending)"
-    - "Owner can delete their server (anti-DMCA relaxed)"
-    - "Voice channel signaling (channel broadcast + presence)"
+    - "PHP-parity: key.publish / key.get endpoints"
+    - "Auto-mod: GET/PUT /servers/{id}/automod + send-message hook"
+    - "Boost rewards: Booster role auto-create + emoji/sticker limit bump"
+    - "Music queue: GET/POST/DELETE /voice/channels/{id}/queue + skip + play"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -705,17 +706,41 @@ agent_communication:
 ### agent_communication:
     -agent: "main"
     -message: |
-        Please test the 3 new backend tasks only (do not retest unrelated features):
-        1. Bot system: create (owner) → receive token → list → regen → send message via `POST /api/bots/message` with `Authorization: Bot <token>` → verify it hits message.create WS for the server → delete.
-           Also verify non-owner cannot create/delete/regen (403).
-        2. Owner delete: create a server as user A, verify user B can't delete it (403), then user A deletes it → 200 OK. Verify cascade deletion (channels, members, etc. gone).
-        3. Voice signaling:
-           - POST /api/voice/channels/{id}/join → returns `participants` array
-           - After 2 users have joined, GET /api/voice/channels/{id}/participants returns both
-           - POST /api/voice/signal with { channel_id, event, data } → 200 (broadcasts)
-           - POST /api/voice/signal with legacy { target_user_id, type, payload } → 200 (1-1 DM signaling)
-           - POST /api/voice/channels/{id}/leave → removes from presence
-        Any account can be created via signup; Turnstile test keys succeed automatically.
+        Please test ONLY the 4 new backend features (do not retest unrelated features):
+
+        1. **PHP-parity: E2E pubkey** (GET /api/users/{id}/keys, POST /api/users/me/keys)
+           - POST /api/users/me/keys with body { "public_key": "<jwk-string>" } → 200 ok
+           - GET /api/users/{user_id}/keys → 200 returns { user_id, public_key, published_at }
+           - GET on a user with no published key returns public_key: null (not 500)
+
+        2. **Auto-mod** (admin@centcord.app should NOT be blocked since they bypass)
+           - GET /api/servers/{id}/automod → returns default config { enabled: false, action: "delete", words: [], block_invites: false, block_links: false, ... }
+           - PUT /api/servers/{id}/automod with { enabled: true, action: "delete", words: ["badword"], block_invites: true } → returns updated config
+           - Then create a NON-admin test user, add them as member, send a message containing "badword" → 422 with detail mentioning "auto-modération"
+           - Send a message containing a discord.gg/foo link → 422 (block_invites)
+           - Admin/owner sending the same content → 200 (bypass)
+           - Permission: only members with PERM_MANAGE_SERVER can PUT/GET — non-admin member 403
+
+        3. **Boost rewards** (POST /api/servers/{id}/boost, DELETE /api/servers/{id}/boost)
+           - Use a NON-owner member of a server (create test user, add them via join/invite if needed)
+           - POST /servers/{id}/boost → 200, then GET /servers/{id} should show boost_count >= 1
+           - Verify "Booster" role exists in GET /servers/{id}/roles and is assigned to the booster member
+           - Verify server emoji_limit and sticker_limit increased by 25 each per boost (base 50 → 75 with 1 boost)
+           - DELETE /servers/{id}/boost → 200 → Booster role removed from member, limits recalculated
+
+        4. **Music queue** (works on a voice channel only)
+           - Create a voice channel via POST /api/servers/{id}/channels with { name: "vocal-test", type: "voice" }
+           - GET /api/voice/channels/{id}/queue → returns { queue: [], current_idx: -1, playing: false }
+           - POST /api/voice/channels/{id}/queue with { url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } → returns track with yt_id "dQw4w9WgXcQ"
+           - Reject invalid URL: POST with { url: "not a youtube url" } → 400 "URL YouTube invalide"
+           - GET queue again → has 1 track, current_idx: 0, playing: true
+           - POST /api/voice/channels/{id}/queue/skip → returns updated state (current_idx -1 if no next)
+           - POST /api/voice/channels/{id}/queue/play with { playing: false } → playing becomes false
+           - DELETE /api/voice/channels/{id}/queue/{track_id} → 200, queue empty
+           - Reject text channel: POST queue on a text channel → 400 "Pas un salon vocal"
+
+        Account ready: admin@centcord.app / CentCordAdmin!2026 (also in /app/memory/test_credentials.md).
+        For tests requiring a non-admin user, register a fresh account via POST /api/auth/register (Turnstile test keys auto-pass).
     -agent: "testing"
     -message: |
         ✅ ALL 3 BACKEND FEATURES TESTED - 23/23 TESTS PASSED
@@ -741,3 +766,160 @@ agent_communication:
           with "bot:" which won't be found. The bot_id and bot_name fields are sufficient for frontend display.
         
         NO CRITICAL ISSUES FOUND. All 3 features ready for production.
+
+## 2026-05-05 — Phase 2: E2E keys, Auto-mod, Boost rewards, Music queue
+
+### backend:
+  - task: "PHP-parity: E2E pubkey publish/get"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            POST /api/users/me/keys — publish ECDH public key (JWK string) for E2E DM encryption.
+            GET /api/users/{user_id}/keys — fetch another user's published public key.
+            Returns { user_id, public_key, published_at }. If user never published, public_key: null (not 500).
+            Non-existent user returns 404.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ PASS - All 4 E2E pubkey tests passed:
+            1. POST /api/users/me/keys with JWK string → 200 { ok: true }
+            2. GET /api/users/{user_id}/keys → 200 with public_key and published_at
+            3. GET for user with no published key → 200 with public_key: null (NOT 500)
+            4. GET for non-existent user → 404
+            All endpoints working correctly.
+
+  - task: "Auto-mod: GET/PUT /servers/{id}/automod + send-message hook"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            GET /api/servers/{id}/automod — returns config { enabled, action, timeout_minutes, words, block_invites, block_links }.
+            PUT /api/servers/{id}/automod — update config (requires PERM_MANAGE_SERVER).
+            POST /api/channels/{id}/messages — applies automod filter before creating message.
+            Blocks messages containing forbidden words, invites (discord.gg/centcord.app/i/), or links.
+            Owner/admin/PERM_MANAGE_MESSAGES bypass. Action: warn/delete/timeout.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ PASS - All 7 auto-mod tests passed:
+            1. GET /api/servers/{id}/automod → 200 with default config (enabled: false, action: delete, words: [], block_invites: false, block_links: false)
+            2. PUT /api/servers/{id}/automod → 200 with updated config (enabled: true, words: ['badword', 'spam'], block_invites: true)
+            3. Non-admin user sending message with "badword" → 422 "Message bloqué par l'auto-modération (mot interdit: badword)"
+            4. Non-admin user sending message with "discord.gg/foo" → 422 "Message bloqué par l'auto-modération (invitation interdite)"
+            5. Non-admin user sending clean message → 200 (allowed)
+            6. Admin/owner sending message with "badword" and invite → 200 (bypass working)
+            7. Non-admin member trying PUT /api/servers/{id}/automod → 403 (permission check working)
+            All auto-mod features working correctly.
+
+  - task: "Boost rewards: Booster role auto-create + emoji/sticker limit bump"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            POST /api/servers/{id}/boost — member boosts server, auto-creates "Booster" role (#FF3B00), assigns to member.
+            Increments server.boost_count, increases emoji_limit and sticker_limit by 25 per boost (base 50).
+            DELETE /api/servers/{id}/boost — removes boost, revokes Booster role if user has 0 boosts, recalculates limits.
+            Broadcasts server.boost and server.boost.reward events.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ PASS - All 8 boost rewards tests passed:
+            1. GET /api/servers/{id} → Initial state: boost_count=0, emoji_limit=50, sticker_limit=50
+            2. POST /api/servers/{id}/boost as non-admin member → 200 { ok: true }
+            3. GET /api/servers/{id} → boost_count=1, emoji_limit=75, sticker_limit=75 (correctly increased by 25)
+            4. GET /api/servers/{id}/roles → "Booster" role exists with color #FF3B00
+            5. GET /api/servers/{id}/members → Booster member has Booster role_id in role_ids
+            6. DELETE /api/servers/{id}/boost → 200 (unboost successful)
+            7. GET /api/servers/{id} → boost_count=0, emoji_limit=50, sticker_limit=50 (correctly decreased back to base)
+            8. GET /api/servers/{id}/members → Booster role_id removed from member's role_ids
+            All boost reward mechanics working correctly.
+
+  - task: "Music queue: GET/POST/DELETE /voice/channels/{id}/queue + skip + play"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            GET /api/voice/channels/{id}/queue — returns { queue: [tracks], current_idx, playing }.
+            POST /api/voice/channels/{id}/queue — add YouTube track (URL or 11-char ID). Extracts yt_id, generates thumbnail.
+            Rejects non-YouTube URLs with 400 "URL YouTube invalide". Rejects text channels with 400 "Pas un salon vocal".
+            DELETE /api/voice/channels/{id}/queue/{track_id} — remove track, adjust current_idx.
+            POST /api/voice/channels/{id}/queue/skip — advance to next track or stop if end.
+            POST /api/voice/channels/{id}/queue/play — set playing: true/false.
+            In-memory state per channel_id. Broadcasts music.update events.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ PASS - All 12 music queue tests passed:
+            1. POST /api/servers/{id}/channels with type: "voice" → 200 (voice channel created)
+            2. GET /api/voice/channels/{id}/queue → 200 { queue: [], current_idx: -1, playing: false }
+            3. POST /api/voice/channels/{id}/queue with valid YouTube URL → 200 with track (yt_id: "dQw4w9WgXcQ", url, thumbnail, track_id)
+            4. POST with invalid URL "not a youtube url" → 400 "URL YouTube invalide"
+            5. POST with raw 11-char ID "dQw4w9WgXcQ" → 200 (accepted)
+            6. GET queue → 2 tracks, current_idx: 0, playing: true
+            7. POST /api/voice/channels/{id}/queue/skip → 200, current_idx: 1
+            8. POST skip again → current_idx: -1, playing: false (end of queue)
+            9. POST /api/voice/channels/{id}/queue/play with playing: true → 200, playing: true
+            10. DELETE /api/voice/channels/{id}/queue/{track_id} → 200
+            11. GET queue → 1 track left
+            12. POST queue on text channel → 400 "Pas un salon vocal"
+            All music queue operations working correctly.
+
+### metadata:
+  created_by: "main_agent"
+  version: "1.4"
+  test_sequence: 5
+  run_ui: false
+
+### test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+### agent_communication:
+    - agent: "testing"
+      message: |
+        ✅ ALL 4 NEW BACKEND FEATURES TESTED - 31/31 TESTS PASSED
+        
+        Completed comprehensive testing of the 4 new backend features with automated test suite (/app/backend_test_new_features.py).
+        
+        TEST RESULTS SUMMARY:
+        1. ✅ PHP-parity E2E pubkey (4 tests) - Publish key, get published key, get unpublished key (null), non-existent user (404)
+        2. ✅ Auto-mod (7 tests) - Get default config, update config, block badword, block invite, allow clean, admin bypass, permission check
+        3. ✅ Boost rewards (8 tests) - Initial state, boost server, verify limits increased, Booster role created, member has role, unboost, verify limits decreased, role removed
+        4. ✅ Music queue (12 tests) - Create voice channel, empty queue, add valid URL, reject invalid URL, add raw ID, verify queue state, skip, skip past end, play/pause, delete track, verify after delete, reject text channel
+        
+        OBSERVATIONS:
+        - All endpoints working correctly with proper authentication and authorization
+        - Permission checks (PERM_MANAGE_SERVER for automod) functioning as expected
+        - Auto-mod correctly blocks forbidden content and allows admin/owner bypass
+        - Boost rewards correctly create Booster role (#FF3B00) and adjust emoji/sticker limits (+25 per boost)
+        - Music queue correctly validates YouTube URLs, rejects text channels, and manages queue state
+        - E2E pubkey endpoints correctly handle published/unpublished keys and non-existent users
+        
+        NO CRITICAL ISSUES FOUND. All 4 features ready for production.

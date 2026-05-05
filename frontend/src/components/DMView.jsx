@@ -10,6 +10,7 @@ import MessageComposer from "./MessageComposer";
 import { Lock, Phone, Video, Search, ArrowLeft } from "lucide-react";
 import { ensureKeyPair, encryptDM, decryptDM } from "../lib/crypto";
 import { toast } from "sonner";
+import DMCall from "./DMCall";
 
 export default function DMView() {
   const { dmId } = useParams();
@@ -82,6 +83,7 @@ export default function DMView() {
   }, [ws, dmId, decryptOne]);
 
   const [replyTo, setReplyTo] = useState(null);
+  const [callMode, setCallMode] = useState(null); // null | 'audio' | 'video'
   const sendMessage = async (content, attachments, reply_to) => {
     let payload = { content, attachments, reply_to };
     let theirPub = null;
@@ -121,8 +123,8 @@ export default function DMView() {
             </span>
           </div>
           <div className="ml-auto flex items-center gap-1">
-            <button data-testid="dm-call" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Appel"><Phone className="w-4 h-4" /></button>
-            <button data-testid="dm-video" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Vidéo"><Video className="w-4 h-4" /></button>
+            <button onClick={() => setCallMode('audio')} data-testid="dm-call" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Appel audio"><Phone className="w-4 h-4" /></button>
+            <button onClick={() => setCallMode('video')} data-testid="dm-video" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Appel vidéo"><Video className="w-4 h-4" /></button>
             <button data-testid="dm-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Rechercher"><Search className="w-4 h-4" /></button>
           </div>
         </header>
@@ -136,6 +138,7 @@ export default function DMView() {
           </>
         )}
       </div>
+      {callMode && other && <DMCall other={other} withVideo={callMode === 'video'} onClose={() => setCallMode(null)} />}
     </main>
   );
 }
