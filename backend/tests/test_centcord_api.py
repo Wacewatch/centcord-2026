@@ -11,7 +11,7 @@ import uuid
 import pytest
 import requests
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://php-mongo-shield.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://php-continuity.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 ADMIN_EMAIL = "admin@centcord.app"
 ADMIN_PASSWORD = "CentCordAdmin!2026"
