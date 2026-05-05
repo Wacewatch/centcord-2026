@@ -896,12 +896,96 @@ agent_communication:
   run_ui: false
 
 ### test_plan:
-  current_focus: []
+  current_focus:
+    - "Default global stickers + DM call signal alias + servers/unread aggregator + server.join WS event"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 ### agent_communication:
+    - agent: "main"
+      message: |
+        Phase 3 — Live UX & PHP-parity gaps (Jul 2025):
+        
+        BACKEND CHANGES (server.py):
+        1. /api/gifs/trending — expanded curated list from 12 to 70 GIFs (with optional ?q= filter)
+        2. NEW /api/stickers/default — returns 24 default global stickers (twemoji-based PNGs, sticker_id prefix "default:")
+        3. /api/stickers/send — now also accepts default stickers (sticker_id starts with "default:")
+        4. NEW /api/servers/unread — returns { server_id: count } aggregated unread per server (sum of channels)
+        5. /api/voice/signal — added 3rd mode: { to, event, data } (no channel_id, no target_user_id) → DM 1-1 alias for DMCall.jsx
+        6. POST /api/invites/{code} — now also broadcasts "server.join" WS event to the joining user (so their AppLayout server list refreshes live)
+        7. DELETE /api/friends/{id} — now broadcasts "friend.update" {action:"remove"} to the other user
+        
+        FRONTEND CHANGES:
+        - UserProfilePopover: ADD-FRIEND button (when status==none), DM-message button, real-time friend status detection (none/pending/accepted/blocked/self)
+        - ServerRail: live unread badge (red counter) on each server icon — updates via WS message.create + 30s refresh
+        - ServerView: subscribed to category.create/update/delete, role.create/update/delete, member.update/kick/ban, server.update, server.boost.reward, sticker.create/delete events for live UI refresh (no manual reload needed)
+        - AppLayout: subscribed to server.join WS event for live-add of joined servers
+        - Message.jsx + MessageList.jsx: clicking on author avatar/name opens UserProfilePopover (passes onOpenProfile prop chain)
+        - EmojiGifPicker: now displays default global stickers + server custom stickers merged
+        
+        Backend restarted and stable. Frontend compiled with only pre-existing warnings (no errors). Please run automated backend tests on the new endpoints:
+        - GET /api/stickers/default (auth required, returns 24 entries)
+        - GET /api/servers/unread (auth required, aggregated counts)
+        - POST /api/voice/signal with { to: "user_id", event: "offer", data: {...} } (no channel_id) → should send "voice.signal" to target user
+        - POST /api/invites/{code} → joining user should receive "server.join" WS event
+        - GET /api/gifs/trending → returns 70 entries (was 12)
+        - POST /api/stickers/send with sticker_id starting "default:" → succeeds, creates sticker message
+
+  - task: "GET /api/stickers/default + send default stickers"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            New endpoint /api/stickers/default returns 24 hardcoded global stickers (twemoji CDN, sticker_id format "default:thumbs", "default:fire", etc).
+            POST /api/stickers/send now branches: if sticker_id starts with "default:", looks up DEFAULT_STICKERS list (no DB query); else queries db.stickers.
+
+  - task: "GET /api/servers/unread aggregated unread counts"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Returns Dict[server_id -> int] summing per-channel unread (excluding own messages and respecting read_markers cutoff).
+            Used by ServerRail for badge display.
+
+  - task: "POST /api/voice/signal — DM alias mode { to, event, data }"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Third signaling mode: payload { to: <user_id>, event: <str>, data: <dict> } with no channel_id and no target_user_id.
+            Sends "voice.signal" WS event { from, event, data } directly to target user. Used by DMCall.jsx for 1-1 video/audio.
+
+  - task: "Broadcast server.join WS event when user joins via invite"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            POST /api/invites/{code} — after creating member doc, also calls hub.send_user(user_id, "server.join", server_doc) so the joining user's other tabs refresh server list live (subscribed in AppLayout.jsx).
     - agent: "testing"
       message: |
         ✅ ALL 4 NEW BACKEND FEATURES TESTED - 31/31 TESTS PASSED

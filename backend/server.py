@@ -756,6 +756,8 @@ async def remove_friend(friend_id: str, user: dict = Depends(get_current_user)):
     if not r or user["user_id"] not in (r["a"], r["b"]):
         raise HTTPException(status_code=404, detail="Not found")
     await db.friends.delete_one({"friend_id": friend_id})
+    other = r["b"] if r["a"] == user["user_id"] else r["a"]
+    await hub.send_user(other, "friend.update", {"friend_id": friend_id, "action": "remove"})
     return {"ok": True}
 
 # ========== Servers ==========
@@ -1290,6 +1292,13 @@ async def use_invite(code: str, user: dict = Depends(get_current_user)):
         await db.members.insert_one({"server_id": server_id, "user_id": user["user_id"], "nickname": None,
                                      "role_ids": [], "joined_at": now_iso()})
         await hub.broadcast_server(server_id, "member.join", {"user_id": user["user_id"]})
+        # Notify the user themselves so their AppLayout server list refreshes live
+        try:
+            srv = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
+            if srv:
+                await hub.send_user(user["user_id"], "server.join", srv)
+        except Exception:
+            pass
     return await db.servers.find_one({"server_id": server_id}, {"_id": 0})
 
 # ========== Messages (channels) ==========
@@ -1661,6 +1670,12 @@ async def voice_signal(payload: VoiceSignalIn, user: dict = Depends(get_current_
     if payload.target_user_id:
         await hub.send_user(payload.target_user_id, "voice.signal", {
             "from": user["user_id"], "type": payload.type, "payload": payload.payload, "dm_id": payload.dm_id
+        })
+        return {"ok": True}
+    # ── DM 1-1 signaling using { to, event, data } shorthand (no channel_id) ──
+    if payload.to and payload.event:
+        await hub.send_user(payload.to, "voice.signal", {
+            "from": user["user_id"], "event": payload.event, "data": payload.data or {}
         })
         return {"ok": True}
     raise HTTPException(status_code=400, detail="Missing channel_id or target_user_id")
@@ -2313,6 +2328,35 @@ async def list_unread(user: dict = Depends(get_current_user)):
     return out
 
 
+@api.get("/servers/unread")
+async def list_servers_unread(user: dict = Depends(get_current_user)):
+    """Returns {server_id: count} aggregated unread per server (sum of all its channels)."""
+    members = await db.members.find({"user_id": user["user_id"]}, {"_id": 0, "server_id": 1}).to_list(500)
+    server_ids = [m["server_id"] for m in members]
+    if not server_ids:
+        return {}
+    channels = await db.channels.find({"server_id": {"$in": server_ids}}, {"_id": 0, "channel_id": 1, "server_id": 1}).to_list(2000)
+    markers = await db.read_markers.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(2000)
+    marker_map = {m["channel_id"]: m.get("last_read_message_id") for m in markers}
+    out: Dict[str, int] = {}
+    for ch in channels:
+        cid = ch["channel_id"]
+        sid = ch["server_id"]
+        last_id = marker_map.get(cid)
+        if last_id:
+            last_msg = await db.messages.find_one({"message_id": last_id}, {"_id": 0, "created_at": 1})
+            cutoff = last_msg["created_at"] if last_msg else None
+            q = {"channel_id": cid, "deleted": {"$ne": True}, "author_id": {"$ne": user["user_id"]}}
+            if cutoff:
+                q["created_at"] = {"$gt": cutoff}
+            count = await db.messages.count_documents(q)
+        else:
+            count = await db.messages.count_documents({"channel_id": cid, "deleted": {"$ne": True}, "author_id": {"$ne": user["user_id"]}})
+        if count > 0:
+            out[sid] = out.get(sid, 0) + count
+    return out
+
+
 # ========== 4. SERVER STATS ==========
 @api.get("/servers/{server_id}/stats")
 async def server_stats(server_id: str, user: dict = Depends(get_current_user)):
@@ -2419,9 +2463,15 @@ class SendStickerIn(BaseModel):
 async def send_sticker(payload: SendStickerIn, user: dict = Depends(get_current_user)):
     ch = await _resolve_channel(payload.channel_id, user)
     await require_membership(ch["server_id"], user, PERM_SEND)
-    st = await db.stickers.find_one({"sticker_id": payload.sticker_id}, {"_id": 0})
-    if not st:
-        raise HTTPException(status_code=404, detail="Sticker introuvable")
+    # Default global stickers (sticker_id starts with "default:") are not in DB
+    if payload.sticker_id.startswith("default:"):
+        st = next((s for s in DEFAULT_STICKERS if s["sticker_id"] == payload.sticker_id), None)
+        if not st:
+            raise HTTPException(status_code=404, detail="Sticker introuvable")
+    else:
+        st = await db.stickers.find_one({"sticker_id": payload.sticker_id}, {"_id": 0})
+        if not st:
+            raise HTTPException(status_code=404, detail="Sticker introuvable")
     msg = {
         "message_id": gen_id("msg"),
         "channel_id": payload.channel_id,
@@ -2576,19 +2626,86 @@ async def update_mention_perms(channel_id: str, payload: MentionPermsIn, user: d
 
 
 # ========== 11. GIF TRENDING ==========
+def _g(idx, title, slug):
+    """Helper to build a Giphy GIF entry."""
+    return {
+        "id": idx,
+        "title": title,
+        "url": f"https://media.giphy.com/media/{slug}/giphy.gif",
+        "preview": f"https://media.giphy.com/media/{slug}/200w.gif",
+    }
+
 TRENDING_GIFS = [
-    {"id": 1,  "title": "Thumbs up",  "url": "https://media.giphy.com/media/111ebonMs90YLu/giphy.gif",        "preview": "https://media.giphy.com/media/111ebonMs90YLu/200w.gif"},
-    {"id": 2,  "title": "Wow",        "url": "https://media.giphy.com/media/5VKbvrjxpVJCM/giphy.gif",        "preview": "https://media.giphy.com/media/5VKbvrjxpVJCM/200w.gif"},
-    {"id": 3,  "title": "Dance",      "url": "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",    "preview": "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/200w.gif"},
-    {"id": 4,  "title": "Facepalm",   "url": "https://media.giphy.com/media/XsUtdIeJ0MWMo/giphy.gif",        "preview": "https://media.giphy.com/media/XsUtdIeJ0MWMo/200w.gif"},
-    {"id": 5,  "title": "Clap",       "url": "https://media.giphy.com/media/GEBGhvBpS7OmhL4fdK/giphy.gif",    "preview": "https://media.giphy.com/media/GEBGhvBpS7OmhL4fdK/200w.gif"},
-    {"id": 6,  "title": "Laugh",      "url": "https://media.giphy.com/media/ZqlvCTNHpqrio/giphy.gif",        "preview": "https://media.giphy.com/media/ZqlvCTNHpqrio/200w.gif"},
-    {"id": 7,  "title": "Mind blown", "url": "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/giphy.gif",   "preview": "https://media.giphy.com/media/xT0xeJpnrWC4XWblEk/200w.gif"},
-    {"id": 8,  "title": "Nope",       "url": "https://media.giphy.com/media/3og0INyCmHlNylks9O/giphy.gif",   "preview": "https://media.giphy.com/media/3og0INyCmHlNylks9O/200w.gif"},
-    {"id": 9,  "title": "OK",         "url": "https://media.giphy.com/media/3oEjHAUOqG3lSS0f1C/giphy.gif",   "preview": "https://media.giphy.com/media/3oEjHAUOqG3lSS0f1C/200w.gif"},
-    {"id": 10, "title": "Hype",       "url": "https://media.giphy.com/media/YRuFixSNWFVcXaxpmX/giphy.gif",   "preview": "https://media.giphy.com/media/YRuFixSNWFVcXaxpmX/200w.gif"},
-    {"id": 11, "title": "Love it",    "url": "https://media.giphy.com/media/3ohzdIuqJoo8QdKlnW/giphy.gif",   "preview": "https://media.giphy.com/media/3ohzdIuqJoo8QdKlnW/200w.gif"},
-    {"id": 12, "title": "Shrug",      "url": "https://media.giphy.com/media/5C0a8IItAHRzqdU4bn/giphy.gif",   "preview": "https://media.giphy.com/media/5C0a8IItAHRzqdU4bn/200w.gif"},
+    _g(1,  "Thumbs up",        "111ebonMs90YLu"),
+    _g(2,  "Wow",              "5VKbvrjxpVJCM"),
+    _g(3,  "Dance",            "l0MYt5jPR6QX5pnqM"),
+    _g(4,  "Facepalm",         "XsUtdIeJ0MWMo"),
+    _g(5,  "Clap",             "GEBGhvBpS7OmhL4fdK"),
+    _g(6,  "Laugh",            "ZqlvCTNHpqrio"),
+    _g(7,  "Mind blown",       "xT0xeJpnrWC4XWblEk"),
+    _g(8,  "Nope",             "3og0INyCmHlNylks9O"),
+    _g(9,  "OK",               "3oEjHAUOqG3lSS0f1C"),
+    _g(10, "Hype",             "YRuFixSNWFVcXaxpmX"),
+    _g(11, "Love it",          "3ohzdIuqJoo8QdKlnW"),
+    _g(12, "Shrug",            "5C0a8IItAHRzqdU4bn"),
+    _g(13, "Wave hello",       "ASd0Ukj0y3qMM"),
+    _g(14, "Eye roll",         "11uV0x9yznTAtO"),
+    _g(15, "Excited",          "12NUbkX6p4xOO4"),
+    _g(16, "Sad",              "OPU6wzx8JrHna"),
+    _g(17, "Angry",            "vX9WcCiWwUF7G"),
+    _g(18, "Confused",          "3o7TKEP6YngkCKFofC"),
+    _g(19, "Yes",              "111ebonMs90YLu"),
+    _g(20, "No",               "GfXFVHUzjlbOg"),
+    _g(21, "Heart",            "OkJat1YNdoD3W"),
+    _g(22, "Kiss",             "G3va31oEEnIkM"),
+    _g(23, "Hug",              "od5H3PmEG5EVq"),
+    _g(24, "High five",        "Y4ABtQrIdtRVm"),
+    _g(25, "Fist bump",        "kTvGfQiUSFvEQ"),
+    _g(26, "Mic drop",         "ujUdrdpX7Ok5W"),
+    _g(27, "Cool",             "26BkMgr5XU0Tt7krS"),
+    _g(28, "Cry",              "L95W4wv8nnb9K"),
+    _g(29, "Crying laugh",     "10JhviFuU2gWD6"),
+    _g(30, "Wink",             "Bzkd1bJC9XDri"),
+    _g(31, "Surprised",        "5VKbvrjxpVJCM"),
+    _g(32, "Yawn",             "yIFJ1JuCgwapy"),
+    _g(33, "Sleep",            "Glh5wK5fgUJZS"),
+    _g(34, "Tired",            "9MJ8DvqV9hpyU"),
+    _g(35, "Bored",            "Y4WwHEbtaeCH6"),
+    _g(36, "Coffee",           "DrJm6F9poo4aA"),
+    _g(37, "Pizza",            "yYSSBtDgbbRzq"),
+    _g(38, "Burger",           "BORq4HF4UjRSE"),
+    _g(39, "Beer cheers",      "12P05XHBWzCbjy"),
+    _g(40, "Wine",             "QU3MGMHL6sDBe"),
+    _g(41, "Party",            "g9582DNuQppxC"),
+    _g(42, "Birthday",         "26tn8zNgycSn4aPja"),
+    _g(43, "Confetti",         "B1uajANvLfsXC"),
+    _g(44, "Fireworks",        "26gsv1iextfRXdgmA"),
+    _g(45, "Christmas",        "l0MYC0LajbaPoEADu"),
+    _g(46, "Halloween",        "26BRtW4zppWp9gMHK"),
+    _g(47, "Cat",              "JIX9t2j0ZTN9S"),
+    _g(48, "Dog",              "3oriO0OEd9QIDdllqo"),
+    _g(49, "Cat typing",       "heIX5HfWgEYx2"),
+    _g(50, "Dog yes",          "5VKbvrjxpVJCM"),
+    _g(51, "Mind reading",     "3o7TKEP6YngkCKFofC"),
+    _g(52, "Working",          "VbnUQpnihPSIgIXuZv"),
+    _g(53, "Coding",           "13HgwGsXF0aiGY"),
+    _g(54, "Hacker",           "YQitWqp5UvFv2"),
+    _g(55, "Game on",          "MhHXCAr3VgXSE"),
+    _g(56, "Victory",          "u6t8nfhuVeRny"),
+    _g(57, "Lose",             "yJTmLVxa5fKvK"),
+    _g(58, "Money",            "JtBZm3Getg3dqxK0zP"),
+    _g(59, "Rocket",           "VxbvpfaTTo3le"),
+    _g(60, "Fire",             "L8K62iTDkzGX6"),
+    _g(61, "100",              "24jKMNi3pYbXuqWtP6"),
+    _g(62, "Star",             "kEKcOWl8RMLde"),
+    _g(63, "Salute",           "1ynCEtlgSxZG8"),
+    _g(64, "Bow",              "5b6XAj3lN3SDO"),
+    _g(65, "Shocked",          "ANbD1CCdA3iI8"),
+    _g(66, "Ok hand",          "tIeCLkB8geYtW"),
+    _g(67, "Wave bye",         "fYxQRsx5Ir1A4"),
+    _g(68, "Welcome",          "3og0IO5z8Rd30ktV6g"),
+    _g(69, "Good night",       "3oz8xYzLKPAcjE7p3W"),
+    _g(70, "Hello there",      "Lopx9eUi34rbq"),
 ]
 
 @api.get("/gifs/trending")
@@ -2597,6 +2714,52 @@ async def gif_trending(q: Optional[str] = None, _user: dict = Depends(get_curren
         ql = q.lower()
         return [g for g in TRENDING_GIFS if ql in g["title"].lower()]
     return TRENDING_GIFS
+
+# ========== Default global stickers (available everywhere) ==========
+def _ds(sid, name, emoji):
+    """Build a default sticker entry using twemoji CDN."""
+    code = "-".join(f"{ord(c):x}" for c in emoji if ord(c) > 0x20 and ord(c) != 0xfe0f)
+    return {
+        "sticker_id": f"default:{sid}",
+        "server_id": "_global",
+        "name": name,
+        "image_url": f"https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/{code}.png",
+        "tags": name,
+        "creator_id": "system",
+        "is_default": True,
+    }
+
+DEFAULT_STICKERS = [
+    _ds("thumbs",  "thumbsup",  "👍"),
+    _ds("clap",    "clap",      "👏"),
+    _ds("party",   "party",     "🎉"),
+    _ds("fire",    "fire",      "🔥"),
+    _ds("100",     "hundred",   "💯"),
+    _ds("heart",   "heart",     "❤️"),
+    _ds("rocket",  "rocket",    "🚀"),
+    _ds("star",    "star",      "⭐"),
+    _ds("crown",   "crown",     "👑"),
+    _ds("trophy",  "trophy",    "🏆"),
+    _ds("brain",   "brain",     "🧠"),
+    _ds("eyes",    "eyes",      "👀"),
+    _ds("smile",   "smile",     "😀"),
+    _ds("joy",     "joy",       "😂"),
+    _ds("love",    "love",      "😍"),
+    _ds("cool",    "cool",      "😎"),
+    _ds("think",   "thinking",  "🤔"),
+    _ds("ok",      "okhand",    "👌"),
+    _ds("muscle",  "muscle",    "💪"),
+    _ds("clap2",   "applause",  "🙌"),
+    _ds("pray",    "pray",      "🙏"),
+    _ds("wave",    "wave",      "👋"),
+    _ds("peace",   "peace",     "✌️"),
+    _ds("bell",    "bell",      "🔔"),
+]
+
+@api.get("/stickers/default")
+async def list_default_stickers(_user: dict = Depends(get_current_user)):
+    """Returns global default stickers available on every server."""
+    return DEFAULT_STICKERS
 
 
 # ========== 12. UPDATE DISCOVER to support tag filtering ==========

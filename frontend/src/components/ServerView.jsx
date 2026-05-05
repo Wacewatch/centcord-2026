@@ -16,6 +16,7 @@ import SearchModal from "./SearchModal";
 import ThreadPanel from "./ThreadPanel";
 import VoiceRoom from "./VoiceRoom";
 import BoostBadge from "./BoostBadge";
+import UserProfilePopover from "./UserProfilePopover";
 import { Hash, Volume2, Megaphone, BookOpen, ChevronDown, ChevronRight, Plus, Settings, Users, Pin, Search, Menu, X as XIcon } from "lucide-react";
 import { cn } from "../lib/utils";
 import { toast } from "sonner";
@@ -44,6 +45,7 @@ export default function ServerView({ servers, reload }) {
   const [activeThread, setActiveThread] = useState(null); // { thread, parent }
   const [customEmojis, setCustomEmojis] = useState([]);
   const [unread, setUnread] = useState({}); // { channel_id: count }
+  const [profileUserId, setProfileUserId] = useState(null);
 
   const loadUnread = useCallback(async () => {
     try { const { data } = await api.get(`/channels/unread`); setUnread(data || {}); } catch (_) {}
@@ -100,16 +102,38 @@ export default function ServerView({ servers, reload }) {
     const offR = ws.subscribe("message.reaction", (d) => setMessages((prev) => prev.map((m) => m.message_id === d.message_id ? { ...m, reactions: d.reactions } : m)));
     const offChCreate = ws.subscribe("channel.create", () => loadServer());
     const offChDel = ws.subscribe("channel.delete", () => loadServer());
+    const offChUpdate = ws.subscribe("channel.update", () => loadServer());
+    const offCatCreate = ws.subscribe("category.create", () => loadServer());
+    const offCatDel = ws.subscribe("category.delete", () => loadServer());
+    const offCatUpdate = ws.subscribe("category.update", () => loadServer());
+    const offRoleCreate = ws.subscribe("role.create", () => { loadServer(); loadMembers(); });
+    const offRoleUpdate = ws.subscribe("role.update", () => { loadServer(); loadMembers(); });
+    const offRoleDel = ws.subscribe("role.delete", () => { loadServer(); loadMembers(); });
     const offMember = ws.subscribe("member.join", () => loadMembers());
+    const offMemberUpdate = ws.subscribe("member.update", () => loadMembers());
+    const offMemberKick = ws.subscribe("member.kick", () => loadMembers());
+    const offMemberBan = ws.subscribe("member.ban", () => loadMembers());
+    const offSrvUpdate = ws.subscribe("server.update", () => loadServer());
     const offEmCreate = ws.subscribe("emoji.create", () => loadEmojis());
     const offEmDel = ws.subscribe("emoji.delete", () => loadEmojis());
     const offBoost = ws.subscribe("server.boost", () => loadServer());
+    const offBoostReward = ws.subscribe("server.boost.reward", () => loadServer());
     const offThread = ws.subscribe("thread.create", (t) => {
       // Mark parent message as having a thread
       setMessages((prev) => prev.map((m) => m.message_id === t.parent_message_id ? { ...m, thread_id: t.thread_id } : m));
     });
-    return () => { offC(); offU(); offD(); offR(); offChCreate(); offChDel(); offMember(); offEmCreate(); offEmDel(); offBoost(); offThread(); };
-  }, [ws, channel, loadServer, loadMembers, loadEmojis]);
+    return () => {
+      offC(); offU(); offD(); offR();
+      offChCreate(); offChDel(); offChUpdate();
+      offCatCreate(); offCatDel(); offCatUpdate();
+      offRoleCreate(); offRoleUpdate(); offRoleDel();
+      offMember(); offMemberUpdate(); offMemberKick(); offMemberBan();
+      offSrvUpdate();
+      offEmCreate(); offEmDel();
+      offBoost(); offBoostReward();
+      offThread();
+    };
+  }, [ws, channel, loadServer, loadMembers, loadEmojis, markRead, user?.user_id]);
 
   if (!server) {
     return (
@@ -301,6 +325,7 @@ export default function ServerView({ servers, reload }) {
               onReply={(m) => setReplyTo(m)}
               onCreateThread={handleCreateThread}
               onOpenThread={(t, parent) => setActiveThread({ thread: t, parent })}
+              onOpenProfile={(uid) => uid && setProfileUserId(uid)}
               customEmojiMap={customEmojiMap}
             />
             <MessageComposer
@@ -322,6 +347,7 @@ export default function ServerView({ servers, reload }) {
       {openCreateChannel && <CreateChannelModal serverId={serverId} categories={server.categories || []} defaultCategoryId={openCreateChannel.categoryId} onClose={() => setOpenCreateChannel(null)} onCreated={() => loadServer()} />}
       {openPins && channel && <PinModal channelId={channel.channel_id} onClose={() => setOpenPins(false)} />}
       {openSearch && <SearchModal serverId={serverId} onClose={() => setOpenSearch(false)} />}
+      {profileUserId && <UserProfilePopover userId={profileUserId} onClose={() => setProfileUserId(null)} />}
     </>
   );
 }

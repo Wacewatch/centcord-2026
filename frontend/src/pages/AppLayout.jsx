@@ -37,12 +37,13 @@ function AppShell() {
     if (!ws) return;
     const offDelete = ws.subscribe("server.delete", () => loadServers());
     const offUpdate = ws.subscribe("server.update", () => loadServers());
+    const offJoin = ws.subscribe("server.join", () => loadServers());
     const offKick = ws.subscribe("kicked", () => {
       toast.error("Vous avez été retiré·e d'un serveur");
       loadServers();
       navigate("/app/me");
     });
-    return () => { offDelete(); offUpdate(); offKick(); };
+    return () => { offDelete(); offUpdate(); offJoin(); offKick(); };
   }, [ws, loadServers, navigate]);
 
   // Close drawer when switching routes on mobile

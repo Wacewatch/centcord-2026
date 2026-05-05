@@ -46,7 +46,7 @@ function renderContent(content, customEmojiMap = {}) {
   });
 }
 
-export default function Message({ msg, grouped, mine, onReact, onReply, onCreateThread, onOpenThread, customEmojiMap }) {
+export default function Message({ msg, grouped, mine, onReact, onReply, onCreateThread, onOpenThread, customEmojiMap, onOpenProfile }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(msg.content);
   const [showEmoji, setShowEmoji] = useState(false);
@@ -91,16 +91,30 @@ export default function Message({ msg, grouped, mine, onReact, onReply, onCreate
       {grouped ? (
         <div className="w-9 shrink-0 text-right text-[10px] text-cc-muted opacity-0 group-hover:opacity-100 pt-1 pr-1">{formatTime(msg.created_at)}</div>
       ) : (
-        <div className="w-9 shrink-0 pt-0.5">
-          <div className="w-9 h-9 bg-cc-base flex items-center justify-center font-display font-extrabold rounded-sm border border-cc-border text-xs">
+        <button
+          type="button"
+          onClick={() => !isWebhook && onOpenProfile && onOpenProfile(author.user_id)}
+          disabled={isWebhook || !onOpenProfile}
+          className="w-9 shrink-0 pt-0.5 cursor-pointer disabled:cursor-default"
+          data-testid={`msg-avatar-${msg.message_id}`}
+        >
+          <div className="w-9 h-9 bg-cc-base flex items-center justify-center font-display font-extrabold rounded-sm border border-cc-border text-xs hover:border-cc-accent transition-colors">
             {avatarUrl ? <img src={avatarUrl} alt="" className="w-full h-full object-cover rounded-[inherit]" /> : initials(displayName)}
           </div>
-        </div>
+        </button>
       )}
       <div className="flex-1 min-w-0">
         {!grouped && (
           <div className="flex items-baseline gap-2">
-            <span className="font-display font-extrabold text-cc-accent" data-testid={`msg-author-${msg.message_id}`}>{displayName}</span>
+            <button
+              type="button"
+              onClick={() => !isWebhook && onOpenProfile && onOpenProfile(author.user_id)}
+              disabled={isWebhook || !onOpenProfile}
+              className="font-display font-extrabold text-cc-accent hover:underline disabled:no-underline disabled:cursor-default"
+              data-testid={`msg-author-${msg.message_id}`}
+            >
+              {displayName}
+            </button>
             {isWebhook && <span className="text-[9px] uppercase tracking-widest text-cc-muted bg-cc-surface2 border border-cc-border px-1.5">BOT</span>}
             <span className="text-[10px] text-cc-muted">{formatDate(msg.created_at)} · {formatTime(msg.created_at)}</span>
             {msg._decrypted && <span className="text-[9px] text-cc-success uppercase tracking-widest flex items-center gap-1"><Lock className="w-2.5 h-2.5" />E2E</span>}

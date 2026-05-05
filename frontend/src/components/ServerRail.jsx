@@ -1,9 +1,11 @@
-import React from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Plus, Compass, MessageSquare, Settings as SettingsIcon } from "lucide-react";
 import { initials, cn } from "../lib/utils";
 import { useMobile } from "../lib/mobile";
+import { useWS } from "../lib/ws";
+import api from "../lib/api";
 
 function Tooltip({ label, children }) {
   return (
@@ -16,7 +18,7 @@ function Tooltip({ label, children }) {
   );
 }
 
-function RailItem({ active, children, onClick, label, testId }) {
+function RailItem({ active, children, onClick, label, testId, badge }) {
   return (
     <Tooltip label={label}>
       <motion.button
@@ -31,7 +33,18 @@ function RailItem({ active, children, onClick, label, testId }) {
         )}
       >
         {active && <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-1 h-7 bg-cc-accent" />}
+        {!active && badge > 0 && (
+          <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-1 h-3 bg-white" />
+        )}
         {children}
+        {badge > 0 && (
+          <span
+            data-testid={`rail-badge-${testId}`}
+            className="absolute -bottom-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center bg-cc-danger text-white text-[10px] font-extrabold rounded-full border-2 border-cc-base shadow"
+          >
+            {badge > 99 ? "99+" : badge}
+          </span>
+        )}
       </motion.button>
     </Tooltip>
   );
@@ -41,12 +54,42 @@ export default function ServerRail({ servers, onCreate, onJoin }) {
   const navigate = useNavigate();
   const { serverId } = useParams();
   const { isMobile, drawerOpen, closeDrawer } = useMobile();
+  const ws = useWS();
+  const [unread, setUnread] = useState({}); // { server_id: count }
+
   const path = window.location.pathname;
   const homeActive = path.startsWith("/app/me");
   const discoverActive = path.startsWith("/app/discover");
   const settingsActive = path.startsWith("/app/settings");
 
-  const go = (to) => { navigate(to); if (isMobile) closeDrawer(); };
+  const loadUnread = useCallback(async () => {
+    try { const { data } = await api.get("/servers/unread"); setUnread(data || {}); } catch (_) {}
+  }, []);
+
+  useEffect(() => { loadUnread(); }, [loadUnread]);
+
+  // Live: update server unread badges as messages arrive / get read
+  useEffect(() => {
+    if (!ws) return;
+    const offCreate = ws.subscribe("message.create", (m) => {
+      if (!m?.server_id || !m?.channel_id) return;
+      // Avoid increment for messages in the currently-viewed channel; ServerView handles markRead
+      const inActiveChannel = path.includes(`/channels/${m.channel_id}`);
+      if (inActiveChannel) return;
+      setUnread((u) => ({ ...u, [m.server_id]: (u[m.server_id] || 0) + 1 }));
+    });
+    const offRefresh = ws.subscribe("server.delete", () => loadUnread());
+    const offRefresh2 = ws.subscribe("server.join", () => loadUnread());
+    // Refresh every 30s to stay in sync after read events
+    const intv = setInterval(loadUnread, 30000);
+    return () => { offCreate(); offRefresh(); offRefresh2(); clearInterval(intv); };
+  }, [ws, path, loadUnread]);
+
+  const go = (to, sid) => {
+    navigate(to);
+    if (sid) setUnread((u) => { const n = { ...u }; delete n[sid]; return n; });
+    if (isMobile) closeDrawer();
+  };
 
   return (
     <aside
@@ -64,13 +107,15 @@ export default function ServerRail({ servers, onCreate, onJoin }) {
       <div className="flex-1 overflow-y-auto w-full flex flex-col items-center gap-3 no-scrollbar">
         {servers.map((s) => {
           const active = s.server_id === serverId;
+          const count = unread[s.server_id] || 0;
           return (
             <RailItem
               key={s.server_id}
               active={active}
-              onClick={() => go(`/app/servers/${s.server_id}`)}
+              onClick={() => go(`/app/servers/${s.server_id}`, s.server_id)}
               label={s.name}
               testId={`rail-server-${s.server_id}`}
+              badge={count}
             >
               {s.icon_url ? (
                 <img src={s.icon_url} alt={s.name} className="w-full h-full object-cover" />

@@ -18,9 +18,19 @@ export default function EmojiGifPicker({ serverId, channelId, onPickEmoji, onPic
   const [search, setSearch] = useState("");
 
   useEffect(() => {
-    if (!serverId) return;
+    if (!serverId) {
+      // Even without a server (e.g., DMs), still load default stickers
+      api.get(`/stickers/default`).then(r => setStickers(r.data || [])).catch(() => {});
+      return;
+    }
     api.get(`/servers/${serverId}/emojis`).then(r => setCustom(r.data || [])).catch(() => {});
-    api.get(`/servers/${serverId}/stickers`).then(r => setStickers(r.data || [])).catch(() => {});
+    // Fetch server stickers + global default stickers, merge
+    Promise.all([
+      api.get(`/servers/${serverId}/stickers`).catch(() => ({ data: [] })),
+      api.get(`/stickers/default`).catch(() => ({ data: [] })),
+    ]).then(([srv, def]) => {
+      setStickers([...(srv.data || []), ...(def.data || [])]);
+    });
   }, [serverId]);
 
   useEffect(() => {
