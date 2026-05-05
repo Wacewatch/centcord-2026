@@ -220,6 +220,34 @@ async def require_membership(server_id: str, user: dict, perm: int = PERM_VIEW) 
         raise HTTPException(status_code=403, detail="Missing permissions")
     return perms
 
+async def assert_not_timed_out(server_id: str, user_id: str):
+    """Empêche un membre en timeout de poster, réagir, ou rejoindre un vocal."""
+    member = await db.members.find_one({"server_id": server_id, "user_id": user_id}, {"_id": 0})
+    if not member:
+        return
+    until = member.get("timeout_until")
+    if not until:
+        return
+    try:
+        until_dt = datetime.fromisoformat(until)
+        if until_dt.tzinfo is None:
+            until_dt = until_dt.replace(tzinfo=timezone.utc)
+        if until_dt > now_utc():
+            remaining_min = int((until_dt - now_utc()).total_seconds() // 60) + 1
+            raise HTTPException(
+                status_code=403,
+                detail=f"Vous êtes en timeout pendant encore {remaining_min} minute(s)."
+            )
+        # Timeout expiré → on nettoie
+        await db.members.update_one(
+            {"server_id": server_id, "user_id": user_id},
+            {"$unset": {"timeout_until": "", "timeout_reason": ""}}
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        return
+
 # ========== Object storage (hybrid: Emergent + local-disk fallback for VPS) ==========
 storage_key: Optional[str] = None
 LOCAL_PREFIX = "local://"
@@ -1052,6 +1080,172 @@ async def get_audit(server_id: str, user: dict = Depends(get_current_user)):
             if u: r["actor"] = public_user(u)
     return rows
 
+# ========== Timeout (mute temporaire) ==========
+class TimeoutIn(BaseModel):
+    minutes: int = Field(ge=1, le=10080)  # 1 minute → 7 jours
+    reason: Optional[str] = Field(default="", max_length=300)
+
+@api.post("/servers/{server_id}/members/{user_id}/timeout")
+async def timeout_member(server_id: str, user_id: str, payload: TimeoutIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_KICK)
+    if user_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="Vous ne pouvez pas vous infliger un timeout.")
+    server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
+    if server and server.get("owner_id") == user_id:
+        raise HTTPException(status_code=400, detail="Impossible d'imposer un timeout au propriétaire.")
+    until = (now_utc() + timedelta(minutes=payload.minutes)).isoformat()
+    r = await db.members.update_one(
+        {"server_id": server_id, "user_id": user_id},
+        {"$set": {"timeout_until": until, "timeout_reason": payload.reason or ""}}
+    )
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Membre introuvable")
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
+        "action": "member.timeout", "target_id": user_id,
+        "data": {"minutes": payload.minutes, "until": until, "reason": payload.reason or ""}, "at": now_iso()
+    })
+    await hub.broadcast_server(server_id, "member.timeout", {
+        "user_id": user_id, "until": until, "reason": payload.reason or "",
+    })
+    return {"ok": True, "until": until}
+
+@api.delete("/servers/{server_id}/members/{user_id}/timeout")
+async def remove_timeout(server_id: str, user_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_KICK)
+    r = await db.members.update_one(
+        {"server_id": server_id, "user_id": user_id},
+        {"$unset": {"timeout_until": "", "timeout_reason": ""}}
+    )
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Membre introuvable")
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
+        "action": "member.timeout.remove", "target_id": user_id, "data": {}, "at": now_iso()
+    })
+    await hub.broadcast_server(server_id, "member.timeout.remove", {"user_id": user_id})
+    return {"ok": True}
+
+# ========== Warnings ==========
+class WarnIn(BaseModel):
+    user_id: str
+    reason: str = Field(min_length=1, max_length=500)
+
+@api.post("/servers/{server_id}/warnings")
+async def warn_member(server_id: str, payload: WarnIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_KICK)
+    if payload.user_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="Vous ne pouvez pas vous avertir vous-même.")
+    member = await db.members.find_one({"server_id": server_id, "user_id": payload.user_id}, {"_id": 0})
+    if not member:
+        raise HTTPException(status_code=404, detail="Membre introuvable")
+    doc = {
+        "warning_id": gen_id("warn"),
+        "server_id": server_id,
+        "user_id": payload.user_id,
+        "moderator_id": user["user_id"],
+        "reason": payload.reason,
+        "created_at": now_iso(),
+    }
+    await db.warnings.insert_one(doc)
+    doc.pop("_id", None)
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
+        "action": "member.warn", "target_id": payload.user_id,
+        "data": {"warning_id": doc["warning_id"], "reason": payload.reason}, "at": now_iso()
+    })
+    try:
+        await push_notification(payload.user_id, "warned", {
+            "server_id": server_id, "reason": payload.reason, "moderator": user["display_name"],
+        })
+    except Exception:
+        pass
+    await hub.broadcast_server(server_id, "member.warn", doc)
+    return doc
+
+@api.get("/servers/{server_id}/warnings")
+async def list_warnings(server_id: str, user_id: Optional[str] = None, user: dict = Depends(get_current_user)):
+    perms = await require_membership(server_id, user, PERM_VIEW)
+    is_mod = bool(perms & PERM_KICK) or bool(perms & PERM_ADMINISTRATOR)
+    q = {"server_id": server_id}
+    if user_id:
+        if user_id != user["user_id"] and not is_mod:
+            raise HTTPException(status_code=403, detail="Réservé aux modérateurs")
+        q["user_id"] = user_id
+    elif not is_mod:
+        q["user_id"] = user["user_id"]
+    rows = await db.warnings.find(q, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
+    uids = list({r["user_id"] for r in rows} | {r["moderator_id"] for r in rows})
+    users = await db.users.find({"user_id": {"$in": uids}}, {"_id": 0}).to_list(2000)
+    umap = {u["user_id"]: public_user(u) for u in users}
+    for r in rows:
+        r["user"] = umap.get(r["user_id"])
+        r["moderator"] = umap.get(r["moderator_id"])
+    return rows
+
+@api.delete("/servers/{server_id}/warnings/{warning_id}")
+async def delete_warning(server_id: str, warning_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_KICK)
+    r = await db.warnings.delete_one({"warning_id": warning_id, "server_id": server_id})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Avertissement introuvable")
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
+        "action": "warn.delete", "data": {"warning_id": warning_id}, "at": now_iso()
+    })
+    return {"ok": True}
+
+# ========== Mod log public ==========
+PUBLIC_MOD_ACTIONS = {
+    "member.kick", "member.ban", "member.unban", "member.timeout",
+    "member.timeout.remove", "member.warn", "warn.delete",
+    "channel.delete", "channel.lock", "channel.unlock",
+}
+
+@api.get("/servers/{server_id}/mod-log")
+async def get_mod_log(server_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_VIEW)
+    rows = await db.audit_log.find(
+        {"server_id": server_id, "action": {"$in": list(PUBLIC_MOD_ACTIONS)}},
+        {"_id": 0}
+    ).sort("at", -1).limit(200).to_list(200)
+    uids = list({r.get("actor_id") for r in rows if r.get("actor_id")} |
+                {r.get("target_id") for r in rows if r.get("target_id")})
+    users = await db.users.find({"user_id": {"$in": uids}}, {"_id": 0}).to_list(2000)
+    umap = {u["user_id"]: public_user(u) for u in users}
+    for r in rows:
+        if r.get("actor_id"): r["actor"] = umap.get(r["actor_id"])
+        if r.get("target_id"): r["target"] = umap.get(r["target_id"])
+    return rows
+
+# ========== User stats ==========
+@api.get("/users/me/stats")
+async def get_my_stats(user: dict = Depends(get_current_user)):
+    uid = user["user_id"]
+    server_count = await db.members.count_documents({"user_id": uid})
+    message_count = await db.messages.count_documents({"author_id": uid, "deleted": {"$ne": True}})
+    collections = await db.list_collection_names()
+    dm_count = await db.dms.count_documents({"members": uid}) if "dms" in collections else 0
+    friend_count = await db.friendships.count_documents({"$or": [{"user_a": uid}, {"user_b": uid}], "status": "accepted"}) if "friendships" in collections else 0
+    reactions_given = await db.messages.count_documents({"reactions.users": uid})
+    voice_doc = await db.voice_stats.find_one({"user_id": uid}, {"_id": 0}) or {}
+    voice_minutes = int(voice_doc.get("total_minutes", 0))
+    bookmark_count = await db.bookmarks.count_documents({"user_id": uid}) if "bookmarks" in collections else 0
+    warnings_received = await db.warnings.count_documents({"user_id": uid})
+    return {
+        "user_id": uid,
+        "server_count": server_count,
+        "message_count": message_count,
+        "dm_count": dm_count,
+        "friend_count": friend_count,
+        "reactions_given": reactions_given,
+        "voice_minutes": voice_minutes,
+        "bookmark_count": bookmark_count,
+        "warnings_received": warnings_received,
+        "joined_at": user.get("created_at"),
+    }
+
+
 # ========== Invites ==========
 @api.post("/servers/{server_id}/invites")
 async def create_invite(server_id: str, payload: CreateInviteIn, user: dict = Depends(get_current_user)):
@@ -1163,6 +1357,7 @@ async def get_messages(channel_id: str, before: Optional[str] = None, limit: int
 async def send_message(channel_id: str, payload: SendMessageIn, user: dict = Depends(get_current_user)):
     ch = await _resolve_channel(channel_id, user)
     perms = await require_membership(ch["server_id"], user, PERM_SEND)
+    await assert_not_timed_out(ch["server_id"], user["user_id"])
     if ch.get("locked") and not (perms & PERM_MANAGE_MESSAGES) and not (perms & PERM_ADMINISTRATOR):
         raise HTTPException(status_code=403, detail="Channel is locked")
     if not rate_limit(f"msg:{user['user_id']}", 30, 10):
@@ -1472,6 +1667,7 @@ async def voice_channel_join(channel_id: str, user: dict = Depends(get_current_u
     if not ch:
         raise HTTPException(status_code=404, detail="Channel not found")
     await require_membership(ch["server_id"], user, PERM_VIEW)
+    await assert_not_timed_out(ch["server_id"], user["user_id"])
     if ch.get("type") != "voice":
         raise HTTPException(status_code=400, detail="Not a voice channel")
     VOICE_PRESENCE.setdefault(channel_id, {})
