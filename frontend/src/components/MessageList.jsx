@@ -1,12 +1,21 @@
 import React, { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Message from "./Message";
+import { MessageListSkeleton } from "./Skeletons";
 
-export default function MessageList({ messages, currentUser, onReact, onReply, onCreateThread, onOpenThread, customEmojiMap }) {
+export default function MessageList({ messages, currentUser, onReact, onReply, onCreateThread, onOpenThread, customEmojiMap, loading }) {
   const ref = useRef(null);
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
   }, [messages.length]);
+
+  if (loading && messages.length === 0) {
+    return (
+      <div data-testid="message-list" className="flex-1 overflow-y-auto bg-cc-surface2 py-4">
+        <MessageListSkeleton rows={6} />
+      </div>
+    );
+  }
 
   return (
     <div ref={ref} data-testid="message-list" className="flex-1 overflow-y-auto bg-cc-surface2 py-4">

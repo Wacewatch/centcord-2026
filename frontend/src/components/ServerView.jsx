@@ -113,8 +113,35 @@ export default function ServerView({ servers, reload }) {
 
   if (!server) {
     return (
-      <main className="flex-1 flex items-center justify-center bg-cc-surface2">
-        <div className="cc-spinner" />
+      <main className="flex-1 flex bg-cc-surface2">
+        {/* Skeleton sidebar */}
+        <aside className="w-60 bg-cc-surface1 border-r border-cc-border hidden md:flex flex-col">
+          <div className="h-12 border-b border-cc-border" />
+          <div className="flex-1 overflow-y-auto">
+            <div className="cc-skeleton mx-3 mt-3" style={{ width: "60%", height: 14 }} />
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="cc-skeleton mx-3 mt-2" style={{ width: `${50 + ((i*13)%40)}%`, height: 18 }} />
+            ))}
+          </div>
+        </aside>
+        <div className="flex-1 flex flex-col">
+          <div className="h-12 border-b border-cc-border flex items-center px-4">
+            <div className="cc-skeleton" style={{ width: "30%", height: 16 }} />
+          </div>
+          <div className="flex-1 overflow-y-auto py-4">
+            <div className="flex flex-col gap-4 p-4">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="flex gap-3">
+                  <div className="cc-skeleton rounded-sm" style={{ width: 36, height: 36 }} />
+                  <div className="flex-1 flex flex-col gap-2">
+                    <div className="cc-skeleton" style={{ width: `${30 + ((i*7)%30)}%`, height: 12 }} />
+                    <div className="cc-skeleton" style={{ width: `${50 + ((i*11)%40)}%`, height: 14 }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </main>
     );
   }

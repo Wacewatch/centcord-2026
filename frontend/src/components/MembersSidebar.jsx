@@ -4,8 +4,9 @@ import api from "../lib/api";
 import { toast } from "sonner";
 import { UserMinus, ShieldOff } from "lucide-react";
 import UserProfilePopover from "./UserProfilePopover";
+import { MembersSidebarSkeleton } from "./Skeletons";
 
-export default function MembersSidebar({ members, server, reload }) {
+export default function MembersSidebar({ members, server, reload, loading }) {
   const [profileUserId, setProfileUserId] = useState(null);
   const groupBy = { Online: [], Offline: [] };
   const owner = server?.owner_id;
@@ -31,6 +32,9 @@ export default function MembersSidebar({ members, server, reload }) {
         Membres — {members.length}
       </div>
       <div className="flex-1 overflow-y-auto py-2">
+        {loading && members.length === 0 && (
+          <MembersSidebarSkeleton rows={8} />
+        )}
         {Object.entries(groupBy).map(([label, list]) => list.length > 0 && (
           <div key={label} className="mb-3">
             <div className="px-4 text-[10px] uppercase tracking-[0.3em] font-bold text-cc-muted mb-1">{label === "Online" ? "En ligne" : "Hors ligne"} — {list.length}</div>
