@@ -27,7 +27,7 @@ export default function MessageComposer({ placeholder, onSend, testIdPrefix = "m
     try {
       const { data } = await api.post("/uploads", fd, { headers: { "Content-Type": "multipart/form-data" } });
       setAttachments((a) => [...a, { url: data.url, original_filename: data.original_filename, content_type: data.content_type, size: data.size }]);
-    } catch (e) { toast.error("Upload failed"); }
+    } catch (e) { toast.error("Échec du téléversement"); }
     finally { setUploading(false); e.target.value = ""; }
   };
 
@@ -65,7 +65,7 @@ export default function MessageComposer({ placeholder, onSend, testIdPrefix = "m
           <Send className="w-4 h-4" />
         </button>
       </div>
-      <div className="text-[10px] uppercase tracking-widest text-cc-muted mt-1.5 px-1">Markdown supported · Shift+Enter for newline · Max 25MB attachments</div>
+      <div className="text-[10px] uppercase tracking-widest text-cc-muted mt-1.5 px-1">Markdown supporté · Maj+Entrée pour saut de ligne · 25 Mo max</div>
     </div>
   );
 }

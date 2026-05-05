@@ -50,6 +50,7 @@ function AppRouter() {
   return (
     <Routes>
       <Route path="/" element={<LandingPage />} />
+      <Route path="/legal" element={<LegalPage />} />
       <Route path="/auth" element={<AuthPage />} />
       <Route
         path="/app/*"

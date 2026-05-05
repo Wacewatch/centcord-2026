@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { initials, formatTime, formatDate } from "../lib/utils";
-import { Smile, MoreHorizontal, Reply, Pin, Trash2, Edit2, Lock } from "lucide-react";
+import { Smile, MoreHorizontal, Reply, Pin, Trash2, Edit2, Lock, Bookmark } from "lucide-react";
 import api from "../lib/api";
 import { toast } from "sonner";
 
@@ -42,9 +42,13 @@ export default function Message({ msg, grouped, mine, onReact }) {
     catch (_) { toast.error("Edit failed"); }
   };
   const remove = async () => {
-    if (!window.confirm("Delete this message?")) return;
+    if (!window.confirm("Supprimer ce message ?")) return;
     try { await api.delete(`/messages/${msg.message_id}`); }
-    catch (_) { toast.error("Delete failed"); }
+    catch (_) { toast.error("Échec de la suppression"); }
+  };
+  const bookmark = async () => {
+    try { await api.post(`/bookmarks/${msg.message_id}`); toast.success("Sauvegardé"); }
+    catch (_) { toast.error("Échec"); }
   };
 
   return (
@@ -123,10 +127,11 @@ export default function Message({ msg, grouped, mine, onReact }) {
             </div>
           )}
         </div>
-        <button className="p-2 text-cc-subtext hover:text-cc-text"><Reply className="w-3.5 h-3.5" /></button>
-        {!msg._decrypted && msg.server_id && <button className="p-2 text-cc-subtext hover:text-cc-text" onClick={() => api.post(`/messages/${msg.message_id}/pin`).catch(() => {})}><Pin className="w-3.5 h-3.5" /></button>}
-        {mine && !editing && <button onClick={() => setEditing(true)} className="p-2 text-cc-subtext hover:text-cc-text" data-testid={`msg-edit-${msg.message_id}`}><Edit2 className="w-3.5 h-3.5" /></button>}
-        {mine && <button onClick={remove} className="p-2 text-cc-subtext hover:text-cc-danger" data-testid={`msg-delete-${msg.message_id}`}><Trash2 className="w-3.5 h-3.5" /></button>}
+        <button onClick={bookmark} className="p-2 text-cc-subtext hover:text-cc-accent" data-testid={`msg-bookmark-${msg.message_id}`} title="Sauvegarder"><Bookmark className="w-3.5 h-3.5" /></button>
+        <button className="p-2 text-cc-subtext hover:text-cc-text" title="Répondre"><Reply className="w-3.5 h-3.5" /></button>
+        {!msg._decrypted && msg.server_id && <button className="p-2 text-cc-subtext hover:text-cc-text" onClick={() => api.post(`/messages/${msg.message_id}/pin`).catch(() => {})} title="Épingler"><Pin className="w-3.5 h-3.5" /></button>}
+        {mine && !editing && <button onClick={() => setEditing(true)} className="p-2 text-cc-subtext hover:text-cc-text" data-testid={`msg-edit-${msg.message_id}`} title="Modifier"><Edit2 className="w-3.5 h-3.5" /></button>}
+        {mine && <button onClick={remove} className="p-2 text-cc-subtext hover:text-cc-danger" data-testid={`msg-delete-${msg.message_id}`} title="Supprimer"><Trash2 className="w-3.5 h-3.5" /></button>}
       </div>
     </div>
   );

@@ -21,8 +21,8 @@ export default function UserBar() {
       await api.patch("/users/me", { custom_status: customStatus });
       await refreshUser();
       setEditing(false);
-      toast.success("Status updated");
-    } catch (_) { toast.error("Failed to update status"); }
+      toast.success("Statut mis à jour");
+    } catch (_) { toast.error("Échec de la mise à jour"); }
   };
 
   return (
@@ -43,7 +43,7 @@ export default function UserBar() {
               onChange={(e) => setCustomStatus(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && saveStatus()}
               onBlur={saveStatus}
-              placeholder="Set a status"
+              placeholder="Définir un statut"
               className="flex-1 bg-transparent border-b border-cc-border focus:border-cc-accent outline-none text-xs py-0.5"
               data-testid="userbar-status-input"
             />

@@ -46,7 +46,7 @@ export default function ServerRail({ servers, onCreate, onJoin }) {
 
   return (
     <aside className="w-20 bg-cc-base border-r border-cc-border flex flex-col items-center py-5 gap-3 shrink-0">
-      <RailItem active={homeActive} onClick={() => navigate("/app/me")} label="Direct Messages" testId="rail-home">
+      <RailItem active={homeActive} onClick={() => navigate("/app/me")} label="Messages privés" testId="rail-home">
         <MessageSquare className="w-5 h-5" />
       </RailItem>
       <div className="cc-divider w-10" />
@@ -68,14 +68,14 @@ export default function ServerRail({ servers, onCreate, onJoin }) {
           </RailItem>
         );
       })}
-      <RailItem onClick={onCreate} label="Create server" testId="rail-create">
+      <RailItem onClick={onCreate} label="Créer un serveur" testId="rail-create">
         <Plus className="w-5 h-5" />
       </RailItem>
-      <RailItem active={discoverActive} onClick={() => navigate("/app/discover")} label="Discover servers" testId="rail-discover">
+      <RailItem active={discoverActive} onClick={() => navigate("/app/discover")} label="Découvrir des serveurs" testId="rail-discover">
         <Compass className="w-5 h-5" />
       </RailItem>
       <div className="mt-auto" />
-      <RailItem active={settingsActive} onClick={() => navigate("/app/settings")} label="Settings" testId="rail-settings">
+      <RailItem active={settingsActive} onClick={() => navigate("/app/settings")} label="Paramètres" testId="rail-settings">
         <SettingsIcon className="w-5 h-5" />
       </RailItem>
     </aside>

@@ -35,7 +35,7 @@ export default function AppLayout() {
     const offDelete = ws.subscribe("server.delete", () => loadServers());
     const offUpdate = ws.subscribe("server.update", () => loadServers());
     const offKick = ws.subscribe("kicked", (d) => {
-      toast.error("You were removed from a server");
+      toast.error("Vous avez été retiré·e d'un serveur");
       loadServers();
       navigate("/app/me");
     });

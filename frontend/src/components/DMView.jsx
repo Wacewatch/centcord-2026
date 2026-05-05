@@ -56,7 +56,7 @@ export default function DMView() {
         } catch (_) { return m; }
       }));
       setMessages(decrypted);
-    } catch (e) { toast.error("Failed to load DM"); }
+    } catch (e) { toast.error("Échec du chargement du MP"); }
     finally { setLoading(false); }
   }, [dmId, navigate, user, refreshUser]);
 
@@ -92,15 +92,14 @@ export default function DMView() {
       }
     }
     try { await api.post(`/dms/${dmId}/messages`, payload); }
-    catch (e) { toast.error("Failed to send"); }
+    catch (e) { toast.error("Échec de l'envoi"); }
   };
 
   return (
     <main className="flex-1 flex min-w-0">
-      {/* Mini sidebar */}
       <aside className="w-64 bg-cc-surface1 border-r border-cc-border flex flex-col shrink-0 hidden md:flex">
         <button onClick={() => navigate("/app/me")} data-testid="dm-back" className="px-4 h-12 border-b border-cc-border flex items-center gap-2 hover:bg-cc-surface2">
-          <ArrowLeft className="w-4 h-4" /> <span className="font-display font-extrabold uppercase text-sm">Back to DMs</span>
+          <ArrowLeft className="w-4 h-4" /> <span className="font-display font-extrabold uppercase text-sm">Retour aux MP</span>
         </button>
         <div className="mt-auto"><UserBar /></div>
       </aside>
@@ -116,13 +115,13 @@ export default function DMView() {
           <div className="flex flex-col">
             <span className="font-bold text-sm" data-testid="dm-other-name">{other?.display_name}</span>
             <span className="text-[10px] uppercase tracking-widest text-cc-muted flex items-center gap-1">
-              <Lock className="w-2.5 h-2.5" /> {other?.public_key ? "End-to-end encrypted" : "Awaiting key handshake"}
+              <Lock className="w-2.5 h-2.5" /> {other?.public_key ? "Chiffré bout-en-bout" : "En attente de la clé du contact"}
             </span>
           </div>
           <div className="ml-auto flex items-center gap-1">
-            <button data-testid="dm-call" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text"><Phone className="w-4 h-4" /></button>
-            <button data-testid="dm-video" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text"><Video className="w-4 h-4" /></button>
-            <button data-testid="dm-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text"><Search className="w-4 h-4" /></button>
+            <button data-testid="dm-call" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Appel"><Phone className="w-4 h-4" /></button>
+            <button data-testid="dm-video" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Vidéo"><Video className="w-4 h-4" /></button>
+            <button data-testid="dm-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Rechercher"><Search className="w-4 h-4" /></button>
           </div>
         </header>
 
@@ -131,7 +130,7 @@ export default function DMView() {
         ) : (
           <>
             <MessageList messages={messages} currentUser={user} onReact={(id, e) => api.post(`/messages/${id}/reactions`, { emoji: e })} />
-            <MessageComposer placeholder={`Message ${other?.display_name || ""} (E2E)`} onSend={sendMessage} testIdPrefix="dm" />
+            <MessageComposer placeholder={`Message à ${other?.display_name || ""} (E2E)`} onSend={sendMessage} testIdPrefix="dm" />
           </>
         )}
       </div>

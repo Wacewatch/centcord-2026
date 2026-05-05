@@ -744,18 +744,60 @@ async def update_server(server_id: str, payload: UpdateServerIn, user: dict = De
 
 @api.delete("/servers/{server_id}")
 async def delete_server(server_id: str, user: dict = Depends(get_current_user)):
+    """Politique anti-DMCA : un serveur ne peut être supprimé que par un administrateur
+    de la plateforme, et uniquement après confirmation d'activité illégale.
+    Le propriétaire peut seulement archiver ou quitter son serveur."""
+    if user.get("role") != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail=("Suppression refusée. Politique anti-DMCA : aucun serveur n'est supprimé "
+                    "sauf en cas d'activité illégale confirmée par la plateforme. "
+                    "Utilisez « archiver » ou « quitter » à la place.")
+        )
     server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
     if not server:
-        raise HTTPException(status_code=404, detail="Not found")
-    if server["owner_id"] != user["user_id"]:
-        raise HTTPException(status_code=403, detail="Only owner can delete server")
+        raise HTTPException(status_code=404, detail="Serveur introuvable")
+    # Exiger un signalement actif d'activité illégale validé par admin
+    active_report = await db.reports.find_one({
+        "target_type": "server", "target_id": server_id,
+        "category": "illegal", "status": "validated"
+    }, {"_id": 0})
+    if not active_report:
+        raise HTTPException(
+            status_code=403,
+            detail="Aucun signalement validé d'activité illégale pour ce serveur."
+        )
     await db.servers.delete_one({"server_id": server_id})
     await db.categories.delete_many({"server_id": server_id})
     await db.channels.delete_many({"server_id": server_id})
     await db.roles.delete_many({"server_id": server_id})
     await db.members.delete_many({"server_id": server_id})
     await db.messages.delete_many({"server_id": server_id})
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
+        "action": "server.delete.illegal", "data": {"report_id": active_report.get("report_id")}, "at": now_iso()
+    })
     await hub.broadcast_server(server_id, "server.delete", {"server_id": server_id})
+    return {"ok": True, "reason": "illegal_activity"}
+
+@api.post("/servers/{server_id}/archive")
+async def archive_server(server_id: str, user: dict = Depends(get_current_user)):
+    """Le propriétaire peut archiver son serveur (caché, lecture seule)."""
+    server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
+    if not server:
+        raise HTTPException(status_code=404, detail="Serveur introuvable")
+    if server["owner_id"] != user["user_id"] and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul le propriétaire peut archiver ce serveur")
+    await db.servers.update_one({"server_id": server_id}, {"$set": {"archived": True, "is_public": False, "archived_at": now_iso()}})
+    await hub.broadcast_server(server_id, "server.archive", {"server_id": server_id})
+    return {"ok": True}
+
+@api.post("/servers/{server_id}/unarchive")
+async def unarchive_server(server_id: str, user: dict = Depends(get_current_user)):
+    server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Seul le propriétaire peut désarchiver")
+    await db.servers.update_one({"server_id": server_id}, {"$set": {"archived": False}})
     return {"ok": True}
 
 @api.post("/servers/{server_id}/leave")
@@ -1023,6 +1065,20 @@ async def send_message(channel_id: str, payload: SendMessageIn, user: dict = Dep
     msg.pop("_id", None)
     msg["author"] = public_user(user)
     await hub.broadcast_server(ch["server_id"], "message.create", msg)
+    # Notifications sur mentions @
+    import re as _re
+    mentions = set(_re.findall(r"@(\w+)", payload.content or ""))
+    if mentions:
+        members = await db.members.find({"server_id": ch["server_id"]}, {"_id": 0}).to_list(2000)
+        uids = [m["user_id"] for m in members]
+        users_in = await db.users.find({"user_id": {"$in": uids}}, {"_id": 0}).to_list(2000)
+        for u in users_in:
+            dn = (u.get("display_name") or "").lower()
+            if dn in (m.lower() for m in mentions) and u["user_id"] != user["user_id"]:
+                await push_notification(u["user_id"], "mention", {
+                    "channel_id": ch["channel_id"], "server_id": ch["server_id"],
+                    "message_id": msg["message_id"], "from": user["display_name"],
+                })
     return msg
 
 @api.patch("/messages/{message_id}")
@@ -1184,9 +1240,13 @@ async def dm_send(dm_id: str, payload: SendMessageIn, user: dict = Depends(get_c
     msg.pop("_id", None)
     msg["author"] = public_user(user)
     await hub.send_users(dm["participants"], "message.create", msg)
+    # Notification au destinataire
+    other_id = next((p for p in dm["participants"] if p != user["user_id"]), None)
+    if other_id:
+        await push_notification(other_id, "dm", {
+            "dm_id": dm_id, "from": user["display_name"], "message_id": msg["message_id"]
+        })
     return msg
-
-# ========== Uploads ==========
 @api.post("/uploads")
 async def upload(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     if not file.filename:
@@ -1297,7 +1357,365 @@ async def ws_endpoint(websocket: WebSocket, token: Optional[str] = Query(None)):
         if uid not in hub.connections:
             await db.users.update_one({"user_id": uid}, {"$set": {"status": "offline", "last_seen": now_iso()}})
 
-# ========== Health ==========
+# ========== Reports / Modération anti-DMCA ==========
+class ReportIn(BaseModel):
+    target_type: str = Field(pattern="^(server|user|message|channel)$")
+    target_id: str
+    category: str = Field(pattern="^(illegal|harassment|spam|nsfw|other)$")
+    description: str = Field(min_length=10, max_length=2000)
+
+@api.post("/reports")
+async def create_report(payload: ReportIn, user: dict = Depends(get_current_user)):
+    if not rate_limit(f"report:{user['user_id']}", 10, 3600):
+        raise HTTPException(status_code=429, detail="Trop de signalements")
+    doc = {
+        "report_id": gen_id("rep"),
+        "reporter_id": user["user_id"],
+        "target_type": payload.target_type,
+        "target_id": payload.target_id,
+        "category": payload.category,
+        "description": payload.description,
+        "status": "pending",  # pending / validated / rejected
+        "created_at": now_iso(),
+    }
+    await db.reports.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api.get("/admin/reports")
+async def list_reports(status_filter: Optional[str] = Query(None, alias="status"), user: dict = Depends(require_admin)):
+    q = {}
+    if status_filter:
+        q["status"] = status_filter
+    rows = await db.reports.find(q, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
+    return rows
+
+@api.patch("/admin/reports/{report_id}")
+async def update_report(report_id: str, action: str = Query(..., pattern="^(validate|reject)$"), user: dict = Depends(require_admin)):
+    new_status = "validated" if action == "validate" else "rejected"
+    await db.reports.update_one({"report_id": report_id}, {"$set": {"status": new_status, "reviewed_by": user["user_id"], "reviewed_at": now_iso()}})
+    return {"ok": True}
+
+# ========== Emojis personnalisés ==========
+class CreateEmojiIn(BaseModel):
+    name: str = Field(min_length=2, max_length=32, pattern="^[a-z0-9_]+$")
+    image_url: str
+
+@api.post("/servers/{server_id}/emojis")
+async def create_emoji(server_id: str, payload: CreateEmojiIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    doc = {
+        "emoji_id": gen_id("emj"),
+        "server_id": server_id,
+        "name": payload.name,
+        "image_url": payload.image_url,
+        "creator_id": user["user_id"],
+        "created_at": now_iso(),
+    }
+    await db.emojis.insert_one(doc)
+    doc.pop("_id", None)
+    await hub.broadcast_server(server_id, "emoji.create", doc)
+    return doc
+
+@api.get("/servers/{server_id}/emojis")
+async def list_emojis(server_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user)
+    return await db.emojis.find({"server_id": server_id}, {"_id": 0}).to_list(200)
+
+@api.delete("/servers/{server_id}/emojis/{emoji_id}")
+async def delete_emoji(server_id: str, emoji_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    await db.emojis.delete_one({"emoji_id": emoji_id, "server_id": server_id})
+    await hub.broadcast_server(server_id, "emoji.delete", {"emoji_id": emoji_id})
+    return {"ok": True}
+
+# ========== Polls / Sondages ==========
+class CreatePollIn(BaseModel):
+    channel_id: str
+    question: str = Field(min_length=2, max_length=300)
+    options: List[str] = Field(min_length=2, max_length=10)
+    multi: bool = False
+    expires_in_minutes: int = Field(0, ge=0, le=10080)
+
+@api.post("/polls")
+async def create_poll(payload: CreatePollIn, user: dict = Depends(get_current_user)):
+    ch = await _resolve_channel(payload.channel_id, user)
+    await require_membership(ch["server_id"], user, PERM_SEND)
+    poll_id = gen_id("pol")
+    options = [{"option_id": gen_id("opt"), "text": o.strip(), "votes": []} for o in payload.options if o.strip()]
+    expires_at = (now_utc() + timedelta(minutes=payload.expires_in_minutes)).isoformat() if payload.expires_in_minutes else None
+    poll = {
+        "poll_id": poll_id, "channel_id": payload.channel_id, "server_id": ch["server_id"],
+        "author_id": user["user_id"], "question": payload.question, "options": options,
+        "multi": payload.multi, "expires_at": expires_at, "ended": False, "created_at": now_iso(),
+    }
+    await db.polls.insert_one(poll)
+    # Créer un message porteur
+    msg = {
+        "message_id": gen_id("msg"),
+        "channel_id": payload.channel_id, "server_id": ch["server_id"],
+        "author_id": user["user_id"], "content": "",
+        "attachments": [], "reply_to": None, "reactions": [], "pinned": False,
+        "poll_id": poll_id, "created_at": now_iso(), "edited_at": None, "deleted": False,
+    }
+    await db.messages.insert_one(msg)
+    msg.pop("_id", None); poll.pop("_id", None)
+    msg["author"] = public_user(user); msg["poll"] = poll
+    await hub.broadcast_server(ch["server_id"], "message.create", msg)
+    return msg
+
+@api.post("/polls/{poll_id}/vote")
+async def vote_poll(poll_id: str, option_id: str = Query(...), user: dict = Depends(get_current_user)):
+    poll = await db.polls.find_one({"poll_id": poll_id}, {"_id": 0})
+    if not poll:
+        raise HTTPException(status_code=404, detail="Sondage introuvable")
+    if poll.get("ended"):
+        raise HTTPException(status_code=410, detail="Sondage clôturé")
+    options = poll["options"]
+    uid = user["user_id"]
+    if not poll.get("multi"):
+        for o in options:
+            if uid in o["votes"]:
+                o["votes"].remove(uid)
+    target = next((o for o in options if o["option_id"] == option_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Option introuvable")
+    if uid in target["votes"]:
+        target["votes"].remove(uid)
+    else:
+        target["votes"].append(uid)
+    await db.polls.update_one({"poll_id": poll_id}, {"$set": {"options": options}})
+    await hub.broadcast_server(poll["server_id"], "poll.update", {"poll_id": poll_id, "options": options})
+    return {"options": options}
+
+# ========== Threads ==========
+class CreateThreadIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    parent_message_id: str
+
+@api.post("/channels/{channel_id}/threads")
+async def create_thread(channel_id: str, payload: CreateThreadIn, user: dict = Depends(get_current_user)):
+    ch = await _resolve_channel(channel_id, user)
+    parent = await db.messages.find_one({"message_id": payload.parent_message_id}, {"_id": 0})
+    if not parent:
+        raise HTTPException(status_code=404, detail="Message parent introuvable")
+    thread_id = gen_id("thr")
+    doc = {
+        "thread_id": thread_id, "channel_id": channel_id, "server_id": ch["server_id"],
+        "name": payload.name, "parent_message_id": payload.parent_message_id,
+        "author_id": user["user_id"], "archived": False,
+        "message_count": 0, "created_at": now_iso(),
+    }
+    await db.threads.insert_one(doc)
+    await db.messages.update_one({"message_id": payload.parent_message_id}, {"$set": {"thread_id": thread_id}})
+    doc.pop("_id", None)
+    await hub.broadcast_server(ch["server_id"], "thread.create", doc)
+    return doc
+
+@api.get("/channels/{channel_id}/threads")
+async def list_threads(channel_id: str, user: dict = Depends(get_current_user)):
+    await _resolve_channel(channel_id, user)
+    return await db.threads.find({"channel_id": channel_id, "archived": False}, {"_id": 0}).sort("created_at", -1).to_list(100)
+
+@api.get("/threads/{thread_id}/messages")
+async def thread_messages(thread_id: str, user: dict = Depends(get_current_user)):
+    t = await db.threads.find_one({"thread_id": thread_id}, {"_id": 0})
+    if not t:
+        raise HTTPException(status_code=404, detail="Fil introuvable")
+    await require_membership(t["server_id"], user)
+    rows = await db.messages.find({"thread_id": thread_id, "deleted": {"$ne": True}}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    return rows
+
+@api.post("/threads/{thread_id}/messages")
+async def thread_send(thread_id: str, payload: SendMessageIn, user: dict = Depends(get_current_user)):
+    t = await db.threads.find_one({"thread_id": thread_id}, {"_id": 0})
+    if not t:
+        raise HTTPException(status_code=404, detail="Fil introuvable")
+    await require_membership(t["server_id"], user, PERM_SEND)
+    msg = {
+        "message_id": gen_id("msg"),
+        "channel_id": t["channel_id"], "server_id": t["server_id"],
+        "thread_id": thread_id, "author_id": user["user_id"],
+        "content": payload.content, "attachments": payload.attachments or [],
+        "reply_to": payload.reply_to, "reactions": [], "pinned": False,
+        "created_at": now_iso(), "edited_at": None, "deleted": False,
+    }
+    await db.messages.insert_one(msg)
+    await db.threads.update_one({"thread_id": thread_id}, {"$inc": {"message_count": 1}})
+    msg.pop("_id", None); msg["author"] = public_user(user)
+    await hub.broadcast_server(t["server_id"], "thread.message", msg)
+    return msg
+
+# ========== Bookmarks (messages sauvegardés) ==========
+@api.post("/bookmarks/{message_id}")
+async def add_bookmark(message_id: str, user: dict = Depends(get_current_user)):
+    m = await db.messages.find_one({"message_id": message_id}, {"_id": 0})
+    if not m:
+        raise HTTPException(status_code=404, detail="Message introuvable")
+    await db.bookmarks.update_one(
+        {"user_id": user["user_id"], "message_id": message_id},
+        {"$set": {"user_id": user["user_id"], "message_id": message_id, "saved_at": now_iso()}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+@api.delete("/bookmarks/{message_id}")
+async def remove_bookmark(message_id: str, user: dict = Depends(get_current_user)):
+    await db.bookmarks.delete_one({"user_id": user["user_id"], "message_id": message_id})
+    return {"ok": True}
+
+@api.get("/bookmarks")
+async def list_bookmarks(user: dict = Depends(get_current_user)):
+    rows = await db.bookmarks.find({"user_id": user["user_id"]}, {"_id": 0}).sort("saved_at", -1).limit(100).to_list(100)
+    ids = [r["message_id"] for r in rows]
+    msgs = await db.messages.find({"message_id": {"$in": ids}}, {"_id": 0}).to_list(200)
+    msg_map = {m["message_id"]: m for m in msgs}
+    out = []
+    for r in rows:
+        m = msg_map.get(r["message_id"])
+        if m:
+            author = await db.users.find_one({"user_id": m["author_id"]}, {"_id": 0})
+            m["author"] = public_user(author) if author else None
+            out.append({"saved_at": r["saved_at"], "message": m})
+    return out
+
+# ========== Webhooks ==========
+class CreateWebhookIn(BaseModel):
+    name: str = Field(min_length=2, max_length=64)
+    channel_id: str
+
+@api.post("/servers/{server_id}/webhooks")
+async def create_webhook(server_id: str, payload: CreateWebhookIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    token = secrets.token_urlsafe(32)
+    doc = {
+        "webhook_id": gen_id("whk"),
+        "server_id": server_id, "channel_id": payload.channel_id,
+        "name": payload.name, "token": token,
+        "creator_id": user["user_id"], "created_at": now_iso(),
+    }
+    await db.webhooks.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api.get("/servers/{server_id}/webhooks")
+async def list_webhooks(server_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    return await db.webhooks.find({"server_id": server_id}, {"_id": 0}).to_list(100)
+
+@api.delete("/servers/{server_id}/webhooks/{webhook_id}")
+async def delete_webhook(server_id: str, webhook_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_SERVER)
+    await db.webhooks.delete_one({"webhook_id": webhook_id, "server_id": server_id})
+    return {"ok": True}
+
+class WebhookExecIn(BaseModel):
+    content: str = Field(max_length=4000)
+    username: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+@api.post("/webhooks/{webhook_id}/execute")
+async def execute_webhook(webhook_id: str, token: str, payload: WebhookExecIn):
+    w = await db.webhooks.find_one({"webhook_id": webhook_id, "token": token}, {"_id": 0})
+    if not w:
+        raise HTTPException(status_code=404, detail="Webhook invalide")
+    msg = {
+        "message_id": gen_id("msg"),
+        "channel_id": w["channel_id"], "server_id": w["server_id"],
+        "author_id": "webhook:" + w["webhook_id"], "webhook_id": w["webhook_id"],
+        "webhook_name": payload.username or w["name"],
+        "webhook_avatar": payload.avatar_url,
+        "content": payload.content, "attachments": [], "reactions": [], "pinned": False,
+        "created_at": now_iso(), "edited_at": None, "deleted": False,
+    }
+    await db.messages.insert_one(msg)
+    msg.pop("_id", None)
+    msg["author"] = {"display_name": payload.username or w["name"], "avatar_url": payload.avatar_url, "user_id": "webhook"}
+    await hub.broadcast_server(w["server_id"], "message.create", msg)
+    return {"ok": True}
+
+# ========== Notifications ==========
+async def push_notification(user_id: str, kind: str, data: dict):
+    doc = {
+        "notif_id": gen_id("ntf"),
+        "user_id": user_id, "kind": kind, "data": data,
+        "read": False, "created_at": now_iso(),
+    }
+    await db.notifications.insert_one(doc)
+    doc.pop("_id", None)
+    await hub.send_user(user_id, "notification.new", doc)
+
+# ========== Server Boost ==========
+@api.post("/servers/{server_id}/boost")
+async def boost_server(server_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user)
+    existing = await db.boosts.find_one({"server_id": server_id, "user_id": user["user_id"]}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=409, detail="Vous boostez déjà ce serveur")
+    await db.boosts.insert_one({"boost_id": gen_id("bst"), "server_id": server_id, "user_id": user["user_id"], "since": now_iso()})
+    await db.servers.update_one({"server_id": server_id}, {"$inc": {"boost_count": 1}})
+    await hub.broadcast_server(server_id, "server.boost", {"user_id": user["user_id"]})
+    return {"ok": True}
+
+@api.delete("/servers/{server_id}/boost")
+async def unboost_server(server_id: str, user: dict = Depends(get_current_user)):
+    res = await db.boosts.delete_one({"server_id": server_id, "user_id": user["user_id"]})
+    if res.deleted_count:
+        await db.servers.update_one({"server_id": server_id}, {"$inc": {"boost_count": -1}})
+    return {"ok": True}
+
+# ========== Mute / Timeout ==========
+class MuteIn(BaseModel):
+    duration_minutes: int = Field(ge=1, le=10080)
+    reason: Optional[str] = Field("", max_length=500)
+
+@api.post("/servers/{server_id}/mute/{target_id}")
+async def mute_member(server_id: str, target_id: str, payload: MuteIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_KICK)  # même perm que kick
+    until = (now_utc() + timedelta(minutes=payload.duration_minutes)).isoformat()
+    await db.members.update_one(
+        {"server_id": server_id, "user_id": target_id},
+        {"$set": {"muted_until": until, "mute_reason": payload.reason}}
+    )
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
+        "target_id": target_id, "action": "member.mute",
+        "data": {"until": until, "reason": payload.reason}, "at": now_iso()
+    })
+    await hub.broadcast_server(server_id, "member.mute", {"user_id": target_id, "until": until})
+    return {"ok": True, "muted_until": until}
+
+@api.delete("/servers/{server_id}/mute/{target_id}")
+async def unmute_member(server_id: str, target_id: str, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_KICK)
+    await db.members.update_one(
+        {"server_id": server_id, "user_id": target_id},
+        {"$unset": {"muted_until": "", "mute_reason": ""}}
+    )
+    return {"ok": True}
+
+# ========== Politique légale ==========
+@api.get("/legal/policy")
+async def get_policy():
+    return {
+        "name": "CentCord",
+        "policy_version": "2026.05",
+        "anti_dmca": True,
+        "highlights": [
+            "Aucun serveur ne peut être supprimé sauf en cas d'activité illégale confirmée.",
+            "La plateforme n'honore pas les demandes DMCA standard non couvertes par le droit français/UE.",
+            "Les contenus signalés sont examinés par notre équipe avant toute action.",
+            "Les messages directs sont chiffrés de bout en bout (E2E) et inaccessibles au serveur.",
+            "Les propriétaires de serveur peuvent archiver, mais pas supprimer leur communauté.",
+        ],
+        "actions": {
+            "archive_server": "POST /api/servers/{id}/archive",
+            "report_illegal": "POST /api/reports (target_type=server, category=illegal)",
+            "request_data": "Contactez admin@centcord.app",
+        }
+    }
+
+
 @api.get("/")
 async def root():
     return {"app": "centcord", "version": "1.0.0", "status": "ok"}
@@ -1328,6 +1746,12 @@ async def on_startup():
     await db.user_sessions.create_index("session_token", unique=True)
     await db.friends.create_index([("a", 1), ("b", 1)], unique=True)
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
+    await db.bookmarks.create_index([("user_id", 1), ("message_id", 1)], unique=True)
+    await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
+    await db.reports.create_index([("status", 1), ("created_at", -1)])
+    await db.emojis.create_index([("server_id", 1)])
+    await db.threads.create_index([("channel_id", 1)])
+    await db.boosts.create_index([("server_id", 1), ("user_id", 1)], unique=True)
     log.info("Indexes ensured")
 
     # Seed admin

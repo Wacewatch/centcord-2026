@@ -28,7 +28,7 @@ export default function MessageList({ messages, currentUser, onReact }) {
       </AnimatePresence>
       {messages.length === 0 && (
         <div className="text-center py-20 text-cc-muted text-xs uppercase tracking-widest">
-          <span className="cc-marker">No messages yet — break the silence.</span>
+          <span className="cc-marker">Aucun message — brisez le silence.</span>
         </div>
       )}
     </div>

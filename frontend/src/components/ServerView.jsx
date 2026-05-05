@@ -7,6 +7,7 @@ import UserBar from "./UserBar";
 import MessageList from "./MessageList";
 import MessageComposer from "./MessageComposer";
 import MembersSidebar from "./MembersSidebar";
+import NotificationsPanel from "./NotificationsPanel";
 import ServerSettingsModal from "./modals/ServerSettingsModal";
 import { Hash, Volume2, Megaphone, BookOpen, ChevronDown, ChevronRight, Plus, Settings, Users, Pin, Search, Bell } from "lucide-react";
 import { initials, cn } from "../lib/utils";
@@ -39,7 +40,7 @@ export default function ServerView({ servers, reload }) {
         setChannel(targetChannel);
         if (!channelId && targetChannel) navigate(`/app/servers/${serverId}/channels/${targetChannel.channel_id}`, { replace: true });
       }
-    } catch (e) { toast.error("Failed to load server"); }
+    } catch (e) { toast.error("Échec du chargement du serveur"); }
   }, [serverId, channelId, navigate]);
 
   const loadMembers = useCallback(async () => {
@@ -88,16 +89,16 @@ export default function ServerView({ servers, reload }) {
   const sendMsg = async (content, attachments) => {
     if (!channel) return;
     try { await api.post(`/channels/${channel.channel_id}/messages`, { content, attachments }); }
-    catch (_) { toast.error("Send failed"); }
+    catch (_) { toast.error("Échec de l'envoi"); }
   };
 
   const createChannel = async () => {
-    const name = prompt("Channel name?");
+    const name = prompt("Nom du salon ?");
     if (!name) return;
     try {
       await api.post(`/servers/${serverId}/channels`, { name, type: "text" });
       await loadServer();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Failed to create channel"); }
+    } catch (e) { toast.error(e?.response?.data?.detail || "Échec de création du salon"); }
   };
 
   return (
@@ -174,19 +175,19 @@ export default function ServerView({ servers, reload }) {
             </>
           )}
           <div className="ml-auto flex items-center gap-1">
-            <button data-testid="header-pins" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text"><Pin className="w-4 h-4" /></button>
-            <button data-testid="header-toggle-members" onClick={() => setShowMembers(!showMembers)} className={cn("p-2 hover:bg-cc-surface2 transition-colors", showMembers ? "text-cc-text" : "text-cc-subtext")}><Users className="w-4 h-4" /></button>
-            <button data-testid="header-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text"><Search className="w-4 h-4" /></button>
-            <button data-testid="header-notifs" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text"><Bell className="w-4 h-4" /></button>
-            <button data-testid="header-settings" onClick={() => setOpenSettings(true)} className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text"><Settings className="w-4 h-4" /></button>
+            <button data-testid="header-pins" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Épinglés"><Pin className="w-4 h-4" /></button>
+            <button data-testid="header-toggle-members" onClick={() => setShowMembers(!showMembers)} className={cn("p-2 hover:bg-cc-surface2 transition-colors", showMembers ? "text-cc-text" : "text-cc-subtext")} title="Membres"><Users className="w-4 h-4" /></button>
+            <button data-testid="header-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Rechercher"><Search className="w-4 h-4" /></button>
+            <NotificationsPanel />
+            <button data-testid="header-settings" onClick={() => setOpenSettings(true)} className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Paramètres"><Settings className="w-4 h-4" /></button>
           </div>
         </header>
         {channel?.type === "voice" ? (
           <div className="flex-1 flex flex-col items-center justify-center bg-cc-surface2 p-10">
             <Volume2 className="w-12 h-12 text-cc-muted mb-4" />
             <div className="font-display font-extrabold text-2xl uppercase tracking-tight">{channel.name}</div>
-            <p className="text-cc-subtext mt-2 max-w-md text-center text-sm">Voice channels are signaling-ready (WebRTC). Connect peers via /api/voice/signal.</p>
-            <button data-testid="join-voice" className="mt-6 bg-cc-accent text-white font-bold uppercase tracking-wider px-6 py-3 cc-brutal-shadow cc-brutal-press">Join voice</button>
+            <p className="text-cc-subtext mt-2 max-w-md text-center text-sm">Les salons vocaux sont prêts (signalisation WebRTC). Connectez les pairs via /api/voice/signal.</p>
+            <button data-testid="join-voice" className="mt-6 bg-cc-accent text-white font-bold uppercase tracking-wider px-6 py-3 cc-brutal-shadow cc-brutal-press">Rejoindre le vocal</button>
           </div>
         ) : (
           <>
