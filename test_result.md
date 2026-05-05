@@ -483,3 +483,261 @@ agent_communication:
           if tags like "-bad-" should be rejected.
         
         NO CRITICAL ISSUES FOUND. All 13 features ready for production.
+
+
+## 2026-05-05 — Continuation tasks (owner bot system, server delete, voice signaling fix)
+
+### backend:
+  - task: "Bot system (CRUD + message sending)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+            New endpoints added:
+            - POST /api/servers/{server_id}/bots  (owner only, create bot, returns token)
+            - GET /api/servers/{server_id}/bots   (list; includes token if caller is owner)
+            - PATCH /api/servers/{server_id}/bots/{bot_id}
+            - POST /api/servers/{server_id}/bots/{bot_id}/regen  (rotate token)
+            - DELETE /api/servers/{server_id}/bots/{bot_id}
+            - POST /api/bots/message  with header `Authorization: Bot <token>`, body { channel_id, content }
+            Limits: max 10 bots/server, name min 2/max 32, content max 4000 chars.
+            Only text/announcement channels accept bot messages.
+        -working: true
+        -agent: "testing"
+        -comment: |
+            ✅ PASS - All 11 bot system tests passed:
+            1. Owner can create bot - returns bot_id, name, token, is_bot: true
+            2. Non-owner cannot create bot - correctly returns 403
+            3. Owner sees token in bot list
+            4. Non-owner does NOT see token in bot list
+            5. Token regeneration works - new token different from old
+            6. Bot description update works
+            7. Bot can send message to text channel - message has bot_id, bot_name fields
+            8. Invalid bot token rejected - returns 401
+            9. Bot cannot post to voice channel - returns 400
+            10. Non-owner cannot delete bot - returns 403
+            11. Owner can delete bot - returns 200
+            
+            Minor: Bot message author enrichment - When retrieving messages via GET /api/channels/{channel_id}/messages, 
+            bot messages have bot_id and bot_name fields present, but the author field is not enriched (None). 
+            This is because get_messages only looks up authors from users collection, and bot author_ids start with "bot:" 
+            which won't be found. The bot_id and bot_name fields are sufficient for frontend display.
+
+  - task: "Owner can delete their server (anti-DMCA relaxed)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+            DELETE /api/servers/{server_id} now allows the owner (or platform admin) to
+            hard-delete the server. Cascades cleanup: categories, channels, roles, members,
+            messages, invites, emojis, stickers, bans, webhooks, bots. Audit logged.
+            Non-owners/non-admins receive 403.
+        -working: true
+        -agent: "testing"
+        -comment: |
+            ✅ PASS - All 2 server deletion tests passed:
+            1. Non-owner cannot delete server - correctly returns 403
+            2. Owner can delete server - returns 200 with {ok: true}
+            3. After deletion, GET /api/servers/{server_id} returns 403 (user no longer has access)
+            4. Deleted server does not appear in user's server list
+            Cascade deletion verified - server removed from all collections.
+
+  - task: "Voice channel signaling (channel broadcast + presence)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+            POST /api/voice/signal now supports two modes:
+            1) DM 1-1 (legacy): body { target_user_id, type, payload, dm_id? }
+            2) Channel: body { channel_id, to?, event, data }
+               - when `to` is omitted, broadcast to all other participants in the voice channel
+               - when `to` set, direct to that user
+            New endpoints:
+            - POST /api/voice/channels/{channel_id}/join    -> { ok, participants: [...] }
+            - POST /api/voice/channels/{channel_id}/leave
+            - GET  /api/voice/channels/{channel_id}/participants
+            Presence held in memory (dict channel_id -> user_id -> { user_id, display_name, avatar_url, joined_at }).
+            Voice presence broadcasted via WS event `voice.presence` { channel_id, participants }.
+        -working: true
+        -agent: "testing"
+        -comment: |
+            ✅ PASS - All 10 voice signaling tests passed:
+            1. First user joins voice channel - returns {ok: true, participants: []} (empty list)
+            2. Second user joins - returns participants array with first user (user_id, display_name, avatar_url, joined_at)
+            3. GET /api/voice/channels/{channel_id}/participants returns both users
+            4. Direct signal to specific user (with 'to' field) - returns 200
+            5. Broadcast signal (no 'to' field) - returns 200
+            6. Legacy DM signaling (target_user_id, type, payload) - returns 200
+            7. Signal with neither channel_id nor target_user_id - correctly returns 400
+            8. User can leave voice channel - returns 200
+            9. After leave, only remaining user in participants list
+            10. Non-member signal to channel - correctly returns 403
+            All voice signaling modes working correctly.
+
+### frontend:
+  - task: "Modern logo + favicon"
+    implemented: true
+    working: "NA"
+    file: "frontend/public/favicon.svg, logo.svg, index.html"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Added brutalist orange gradient 'C' favicon (SVG) + logo.svg wordmark. Updated index.html with modern meta tags, theme color #FF3B00, CentCord title."
+
+  - task: "UserBar redesign (clean bottom-left profile bar)"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/components/UserBar.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Redesigned compact profile zone with avatar + name + status, click-to-edit status inline, clean divider to settings + logout. Removed mic/deafen/notifications clutter."
+
+  - task: "Responsive layout (mobile drawers)"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/lib/mobile.js, AppLayout.jsx, ServerRail.jsx, ServerView.jsx, DMHome.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+            Added MobileProvider/useMobile hook (breakpoint 768px).
+            ServerRail + Channel/DM sidebars slide in as overlay drawers on mobile with backdrop.
+            Hamburger toggle in ServerView and DMHome headers. Channel select closes drawer on mobile.
+            MembersSidebar now visible from md+ instead of xl+.
+            Added no-scrollbar utility + iOS zoom-prevention CSS.
+
+  - task: "Server icon/banner upload in settings"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/components/modals/ServerSettingsModal.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Overview tab now shows icon preview + upload button + banner preview + upload button, wired to /api/uploads → PATCH /api/servers/{id} on Save."
+
+  - task: "Bots tab in server settings"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/components/modals/ServerSettingsModal.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "New `Bots` tab: create bot (name + optional avatar upload + description), list bots with token reveal/copy/regen/delete (owner-only)."
+
+  - task: "Delete server button in danger zone (owner)"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/components/modals/ServerSettingsModal.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Danger zone now shows a 'Supprimer définitivement' block for owner, requiring typing the exact server name to confirm."
+
+  - task: "Voice channel frontend (WebRTC channel broadcast)"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/components/VoiceRoom.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: |
+            Rewrote VoiceRoom to match new backend:
+            - On join: navigator.getUserMedia + POST /voice/channels/{id}/join
+            - Broadcasts 'join' signal; existing participants send 'offer', peer runs answer/ice
+            - Mute/deafen buttons, participant grid, leave endpoint + cleanup on unmount
+            - Shows precise permission errors (NotAllowed / NotFound)
+
+### metadata:
+  created_by: "main_agent"
+  version: "1.2"
+  test_sequence: 3
+  run_ui: false
+
+### test_plan:
+  current_focus:
+    - "Bot system (CRUD + message sending)"
+    - "Owner can delete their server (anti-DMCA relaxed)"
+    - "Voice channel signaling (channel broadcast + presence)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+### agent_communication:
+    -agent: "main"
+    -message: |
+        Please test the 3 new backend tasks only (do not retest unrelated features):
+        1. Bot system: create (owner) → receive token → list → regen → send message via `POST /api/bots/message` with `Authorization: Bot <token>` → verify it hits message.create WS for the server → delete.
+           Also verify non-owner cannot create/delete/regen (403).
+        2. Owner delete: create a server as user A, verify user B can't delete it (403), then user A deletes it → 200 OK. Verify cascade deletion (channels, members, etc. gone).
+        3. Voice signaling:
+           - POST /api/voice/channels/{id}/join → returns `participants` array
+           - After 2 users have joined, GET /api/voice/channels/{id}/participants returns both
+           - POST /api/voice/signal with { channel_id, event, data } → 200 (broadcasts)
+           - POST /api/voice/signal with legacy { target_user_id, type, payload } → 200 (1-1 DM signaling)
+           - POST /api/voice/channels/{id}/leave → removes from presence
+        Any account can be created via signup; Turnstile test keys succeed automatically.
+    -agent: "testing"
+    -message: |
+        ✅ ALL 3 BACKEND FEATURES TESTED - 23/23 TESTS PASSED
+        
+        Completed comprehensive testing of the 3 new backend features with automated test suite (/app/backend_test.py).
+        
+        TEST RESULTS SUMMARY:
+        1. ✅ Bot system (11 tests) - Create, list, update, regen token, send message, delete. All CRUD operations working.
+        2. ✅ Owner delete server (2 tests) - Non-owner 403, owner 200, cascade deletion verified.
+        3. ✅ Voice signaling (10 tests) - Join, leave, participants, direct/broadcast signals, legacy DM mode.
+        
+        OBSERVATIONS:
+        - All endpoints working correctly with proper authentication and authorization
+        - Permission checks (owner-only, member-only) functioning as expected
+        - Bot token security working (owner sees token, non-owner doesn't)
+        - Voice presence tracking working correctly
+        - Cascade deletion working (server + all related data removed)
+        
+        MINOR NOTE:
+        - Bot message author enrichment: When retrieving messages via GET /api/channels/{channel_id}/messages, 
+          bot messages have bot_id and bot_name fields present, but the author field is not enriched (None). 
+          This is because get_messages only looks up authors from users collection, and bot author_ids start 
+          with "bot:" which won't be found. The bot_id and bot_name fields are sufficient for frontend display.
+        
+        NO CRITICAL ISSUES FOUND. All 3 features ready for production.

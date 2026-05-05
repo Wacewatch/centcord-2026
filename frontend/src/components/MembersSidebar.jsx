@@ -26,7 +26,7 @@ export default function MembersSidebar({ members, server, reload }) {
   };
 
   return (
-    <aside className="w-60 bg-cc-surface1 border-l border-cc-border flex flex-col shrink-0 hidden xl:flex">
+    <aside className="w-60 bg-cc-surface1 border-l border-cc-border flex flex-col shrink-0 hidden md:flex">
       <div className="px-4 py-3 text-[10px] uppercase tracking-[0.3em] font-bold text-cc-muted border-b border-cc-border">
         Membres — {members.length}
       </div>

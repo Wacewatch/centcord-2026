@@ -35,7 +35,15 @@ export default function CreateChannelModal({ serverId, categories = [], defaultC
       toast.success(`Salon « ${cleanName} » créé`);
       onCreated && onCreated(data);
       onClose();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Échec de la création"); }
+    } catch (e) {
+      const detail = e?.response?.data?.detail;
+      let msg = "Échec de la création";
+      if (typeof detail === "string") msg = detail;
+      else if (Array.isArray(detail) && detail[0]?.msg) msg = detail[0].msg;
+      else if (e?.message) msg = e.message;
+      toast.error(msg);
+      console.error("Create channel error:", e?.response?.data || e);
+    }
     finally { setLoading(false); }
   };
 

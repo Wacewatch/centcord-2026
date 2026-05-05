@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import api from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useWS } from "../lib/ws";
+import { useMobile } from "../lib/mobile";
 import UserBar from "./UserBar";
 import MessageList from "./MessageList";
 import MessageComposer from "./MessageComposer";
@@ -15,7 +16,7 @@ import SearchModal from "./SearchModal";
 import ThreadPanel from "./ThreadPanel";
 import VoiceRoom from "./VoiceRoom";
 import BoostBadge from "./BoostBadge";
-import { Hash, Volume2, Megaphone, BookOpen, ChevronDown, ChevronRight, Plus, Settings, Users, Pin, Search } from "lucide-react";
+import { Hash, Volume2, Megaphone, BookOpen, ChevronDown, ChevronRight, Plus, Settings, Users, Pin, Search, Menu, X as XIcon } from "lucide-react";
 import { cn } from "../lib/utils";
 import { toast } from "sonner";
 
@@ -28,11 +29,12 @@ export default function ServerView({ servers, reload }) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const ws = useWS();
+  const { isMobile, drawerOpen, toggleDrawer, closeDrawer } = useMobile();
   const [server, setServer] = useState(null);
   const [channel, setChannel] = useState(null);
   const [messages, setMessages] = useState([]);
   const [members, setMembers] = useState([]);
-  const [showMembers, setShowMembers] = useState(true);
+  const [showMembers, setShowMembers] = useState(() => (typeof window !== "undefined" ? window.innerWidth >= 768 : true));
   const [collapsedCats, setCollapsedCats] = useState({});
   const [openSettings, setOpenSettings] = useState(false);
   const [openCreateChannel, setOpenCreateChannel] = useState(null); // null | { categoryId }
@@ -138,6 +140,11 @@ export default function ServerView({ servers, reload }) {
     setOpenCreateChannel({ categoryId });
   };
 
+  const goToChannel = (cid) => {
+    navigate(`/app/servers/${serverId}/channels/${cid}`);
+    if (isMobile) closeDrawer();
+  };
+
   const handleCreateThread = async (parentMsg) => {
     const name = prompt("Nom du fil ?", parentMsg.content?.slice(0, 50) || "Discussion");
     if (!name) return;
@@ -150,10 +157,20 @@ export default function ServerView({ servers, reload }) {
 
   return (
     <>
-      <aside className="w-64 bg-cc-surface1 border-r border-cc-border flex flex-col shrink-0">
+      <aside
+        className={cn(
+          "w-64 bg-cc-surface1 border-r border-cc-border flex flex-col shrink-0 transition-transform duration-300 ease-out",
+          // Mobile: drawer sitting next to the ServerRail (w-20)
+          isMobile ? "fixed inset-y-0 left-20 z-40 h-[100dvh]" : "",
+          isMobile && !drawerOpen ? "-translate-x-[calc(100%+5rem)]" : "translate-x-0"
+        )}
+      >
         <button data-testid="server-header" onClick={() => setOpenSettings(true)} className="h-12 border-b border-cc-border px-4 flex items-center justify-between hover:bg-cc-surface2 transition-colors">
           <span className="font-display font-extrabold uppercase tracking-tighter text-sm truncate">{server.name}</span>
-          <ChevronDown className="w-4 h-4 text-cc-muted" />
+          <div className="flex items-center gap-1 shrink-0">
+            <Plus onClick={(e) => { e.stopPropagation(); createChannel(null); }} className="w-4 h-4 text-cc-muted hover:text-cc-accent" />
+            <ChevronDown className="w-4 h-4 text-cc-muted" />
+          </div>
         </button>
         <div className="flex-1 overflow-y-auto px-2 py-3 space-y-3">
           {cats.map((cat) => {
@@ -174,7 +191,7 @@ export default function ServerView({ servers, reload }) {
                       return (
                         <li key={c.channel_id}>
                           <button
-                            onClick={() => navigate(`/app/servers/${serverId}/channels/${c.channel_id}`)}
+                            onClick={() => goToChannel(c.channel_id)}
                             data-testid={`channel-${c.channel_id}`}
                             className={cn(
                               "w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors",
@@ -204,7 +221,7 @@ export default function ServerView({ servers, reload }) {
                 const active = c.channel_id === channel?.channel_id;
                 return (
                   <li key={c.channel_id}>
-                    <button onClick={() => navigate(`/app/servers/${serverId}/channels/${c.channel_id}`)} className={cn("w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors", active ? "bg-cc-surface2 text-cc-text" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text")}>
+                    <button onClick={() => goToChannel(c.channel_id)} className={cn("w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors", active ? "bg-cc-surface2 text-cc-text" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text")}>
                       <Ic className="w-4 h-4 text-cc-muted shrink-0" />
                       <span className="truncate">{c.name}</span>
                     </button>
@@ -218,18 +235,28 @@ export default function ServerView({ servers, reload }) {
       </aside>
 
       <main className="flex-1 flex flex-col min-w-0">
-        <header className="h-12 border-b border-cc-border px-4 flex items-center gap-3">
-          <Icon className="w-4 h-4 text-cc-muted" />
-          <span className="font-display font-bold uppercase tracking-tight text-sm" data-testid="channel-name">{channel?.name || "—"}</span>
+        <header className="h-12 border-b border-cc-border px-2 sm:px-4 flex items-center gap-2 sm:gap-3">
+          {isMobile && (
+            <button
+              onClick={toggleDrawer}
+              aria-label="Menu"
+              data-testid="mobile-menu-toggle"
+              className="p-2 -ml-1 text-cc-subtext hover:text-cc-text"
+            >
+              {drawerOpen ? <XIcon className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+          )}
+          <Icon className="w-4 h-4 text-cc-muted shrink-0" />
+          <span className="font-display font-bold uppercase tracking-tight text-sm truncate" data-testid="channel-name">{channel?.name || "—"}</span>
           {channel?.topic && (
             <>
-              <div className="w-px h-5 bg-cc-border" />
-              <span className="text-cc-subtext text-xs truncate">{channel.topic}</span>
+              <div className="w-px h-5 bg-cc-border hidden sm:block" />
+              <span className="text-cc-subtext text-xs truncate hidden sm:inline">{channel.topic}</span>
             </>
           )}
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto flex items-center gap-0.5 sm:gap-1 shrink-0">
             <BoostBadge server={server} onChange={loadServer} />
-            <button onClick={() => setOpenPins(true)} data-testid="header-pins" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Épinglés"><Pin className="w-4 h-4" /></button>
+            <button onClick={() => setOpenPins(true)} data-testid="header-pins" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text hidden sm:inline-flex" title="Épinglés"><Pin className="w-4 h-4" /></button>
             <button data-testid="header-toggle-members" onClick={() => setShowMembers(!showMembers)} className={cn("p-2 hover:bg-cc-surface2 transition-colors", showMembers ? "text-cc-text" : "text-cc-subtext")} title="Membres"><Users className="w-4 h-4" /></button>
             <button onClick={() => setOpenSearch(true)} data-testid="header-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Rechercher"><Search className="w-4 h-4" /></button>
             <NotificationsPanel />

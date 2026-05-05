@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import ModalShell from "./ModalShell";
 import { useAuth } from "../../lib/auth";
 import { useNavigate } from "react-router-dom";
-import { Copy, Archive, AlertTriangle, ShieldAlert } from "lucide-react";
+import { Copy, Archive, AlertTriangle, ShieldAlert, Trash2, Bot, Upload, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { initials } from "../../lib/utils";
 
 const TABS = [
@@ -16,6 +16,7 @@ const TABS = [
   { id: "emojis", label: "Émojis" },
   { id: "stickers", label: "Stickers" },
   { id: "webhooks", label: "Webhooks" },
+  { id: "bots", label: "Bots" },
   { id: "mention-perms", label: "Mentions" },
   { id: "bans", label: "Bannissements" },
   { id: "audit", label: "Journal d'audit" },
@@ -26,7 +27,13 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [tab, setTab] = useState("overview");
-  const [form, setForm] = useState({ name: server.name, description: server.description, is_public: server.is_public });
+  const [form, setForm] = useState({
+    name: server.name,
+    description: server.description,
+    is_public: server.is_public,
+    icon_url: server.icon_url || "",
+    banner_url: server.banner_url || "",
+  });
   const [tagsInput, setTagsInput] = useState((server.tags || []).join(", "));
   const [stats, setStats] = useState(null);
   const [categoriesList, setCategoriesList] = useState(server.categories || []);
@@ -42,6 +49,12 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
   const [newWebhook, setNewWebhook] = useState({ name: "", channel_id: "" });
   const [reportText, setReportText] = useState("");
   const [selectedChannelForPerms, setSelectedChannelForPerms] = useState(null);
+  // Bots
+  const [bots, setBots] = useState([]);
+  const [newBot, setNewBot] = useState({ name: "", description: "", avatar_url: "" });
+  const [revealedTokens, setRevealedTokens] = useState({}); // {bot_id: true}
+  // Delete confirmation
+  const [deleteConfirm, setDeleteConfirm] = useState("");
   const isOwner = server.owner_id === user?.user_id;
 
   useEffect(() => {
@@ -52,18 +65,30 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
     if (tab === "webhooks") api.get(`/servers/${server.server_id}/webhooks`).then(r => setWebhooks(r.data)).catch(() => {});
     if (tab === "stats") api.get(`/servers/${server.server_id}/stats`).then(r => setStats(r.data)).catch(() => {});
     if (tab === "stickers") api.get(`/servers/${server.server_id}/stickers`).then(r => setStickers(r.data)).catch(() => {});
+    if (tab === "bots") api.get(`/servers/${server.server_id}/bots`).then(r => setBots(r.data)).catch(() => {});
   }, [tab, server.server_id]);
 
   const save = async () => {
     setSaving(true);
     try {
-      await api.patch(`/servers/${server.server_id}`, form);
+      // Only send fields that have content or changed (send null for empty to clear)
+      const payload = {
+        name: form.name,
+        description: form.description || "",
+        is_public: form.is_public,
+      };
+      if (form.icon_url !== (server.icon_url || "")) payload.icon_url = form.icon_url || null;
+      if (form.banner_url !== (server.banner_url || "")) payload.banner_url = form.banner_url || null;
+      await api.patch(`/servers/${server.server_id}`, payload);
       // Save tags
       const tags = tagsInput.split(",").map(t => t.trim().toLowerCase()).filter(Boolean);
       await api.patch(`/servers/${server.server_id}/tags`, { tags });
       toast.success("Enregistré"); reload();
     }
-    catch (e) { toast.error(e?.response?.data?.detail || "Échec"); }
+    catch (e) {
+      const d = e?.response?.data?.detail;
+      toast.error(typeof d === "string" ? d : "Échec");
+    }
     finally { setSaving(false); }
   };
 
@@ -189,17 +214,136 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
     catch (_) { toast.error("Échec"); }
   };
 
+  // ── Server icon/banner upload ──
+  const uploadServerImage = async (e, field) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    try {
+      const { data } = await api.post("/uploads", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      const url = data.url?.startsWith("http") ? data.url : `${process.env.REACT_APP_BACKEND_URL}${data.url}`;
+      setForm((p) => ({ ...p, [field]: url }));
+      toast.success("Image téléversée — cliquez sur Enregistrer pour appliquer");
+    } catch (_) { toast.error("Échec du téléversement"); }
+    finally { e.target.value = ""; }
+  };
+
+  // ── Bots ──
+  const createBot = async () => {
+    if (!newBot.name || newBot.name.length < 2) { toast.error("Nom du bot requis (min 2 caractères)"); return; }
+    try {
+      const { data } = await api.post(`/servers/${server.server_id}/bots`, newBot);
+      setBots([data, ...bots]);
+      setRevealedTokens((p) => ({ ...p, [data.bot_id]: true }));
+      setNewBot({ name: "", description: "", avatar_url: "" });
+      toast.success(`Bot « ${data.name} » créé — copiez le token !`);
+    } catch (e) {
+      const d = e?.response?.data?.detail;
+      toast.error(typeof d === "string" ? d : (Array.isArray(d) && d[0]?.msg) || "Échec");
+    }
+  };
+
+  const uploadBotAvatar = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    try {
+      const { data } = await api.post("/uploads", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      const url = data.url?.startsWith("http") ? data.url : `${process.env.REACT_APP_BACKEND_URL}${data.url}`;
+      setNewBot((p) => ({ ...p, avatar_url: url }));
+    } catch (_) { toast.error("Échec du téléversement"); }
+    finally { e.target.value = ""; }
+  };
+
+  const regenBotToken = async (bot) => {
+    if (!window.confirm(`Régénérer le token de « ${bot.name} » ? L'ancien cessera immédiatement de fonctionner.`)) return;
+    try {
+      const { data } = await api.post(`/servers/${server.server_id}/bots/${bot.bot_id}/regen`);
+      setBots(bots.map(b => b.bot_id === bot.bot_id ? data : b));
+      setRevealedTokens((p) => ({ ...p, [bot.bot_id]: true }));
+      toast.success("Nouveau token généré");
+    } catch (_) { toast.error("Échec"); }
+  };
+
+  const deleteBot = async (bot) => {
+    if (!window.confirm(`Supprimer le bot « ${bot.name} » ?`)) return;
+    try {
+      await api.delete(`/servers/${server.server_id}/bots/${bot.bot_id}`);
+      setBots(bots.filter(b => b.bot_id !== bot.bot_id));
+      toast.success("Bot supprimé");
+    } catch (_) { toast.error("Échec"); }
+  };
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+    toast.success("Copié");
+  };
+
+  // ── Delete server (owner) ──
+  const deleteServer = async () => {
+    if (deleteConfirm !== server.name) {
+      toast.error("Nom du serveur incorrect");
+      return;
+    }
+    if (!window.confirm(`Supprimer définitivement « ${server.name} » ? Tous les salons, messages, rôles et membres seront effacés. Cette action est IRRÉVERSIBLE.`)) return;
+    try {
+      await api.delete(`/servers/${server.server_id}`);
+      toast.success("Serveur supprimé");
+      onClose();
+      reload && reload();
+      navigate("/app/me");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Échec de la suppression");
+    }
+  };
+
   return (
     <ModalShell title={`${server.name} · paramètres`} onClose={onClose} testId="server-settings-modal" wide>
-      <div className="grid grid-cols-12 gap-6 mt-2">
-        <nav className="col-span-3 space-y-1 border-r border-cc-border pr-3">
+      <div className="grid grid-cols-1 md:grid-cols-12 gap-4 md:gap-6 mt-2">
+        <nav className="md:col-span-3 flex md:flex-col gap-1 md:space-y-1 md:border-r md:border-cc-border md:pr-3 overflow-x-auto md:overflow-visible scrollbar-thin pb-1 md:pb-0">
           {TABS.map((t) => (
-            <button key={t.id} onClick={() => setTab(t.id)} data-testid={`server-tab-${t.id}`} className={`w-full text-left px-3 py-2 text-sm transition-colors ${tab === t.id ? "bg-cc-surface2 text-cc-text" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text"}`}>{t.label}</button>
+            <button key={t.id} onClick={() => setTab(t.id)} data-testid={`server-tab-${t.id}`} className={`shrink-0 md:w-full text-left whitespace-nowrap md:whitespace-normal px-3 py-2 text-xs md:text-sm transition-colors ${tab === t.id ? "bg-cc-surface2 text-cc-text border-b-2 md:border-b-0 md:border-l-2 border-cc-accent md:border-l-cc-accent" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text"}`}>{t.label}</button>
           ))}
         </nav>
-        <div className="col-span-9 max-h-[60vh] overflow-y-auto">
+        <div className="md:col-span-9 max-h-[60vh] md:max-h-[65vh] overflow-y-auto min-w-0">
           {tab === "overview" && (
-            <div className="space-y-4">
+            <div className="space-y-5">
+              {/* Icon & Banner */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Icône du serveur</label>
+                  <div className="mt-2 flex items-center gap-3">
+                    <div className="w-20 h-20 bg-cc-base border border-cc-border rounded-md overflow-hidden flex items-center justify-center font-display font-extrabold text-cc-muted shrink-0">
+                      {form.icon_url ? <img src={form.icon_url} alt="icon" className="w-full h-full object-cover" /> : initials(form.name || "?")}
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="bg-cc-accent text-white px-3 py-1.5 text-[11px] uppercase tracking-widest font-bold cursor-pointer cc-brutal-shadow cc-brutal-press inline-flex items-center gap-1.5" data-testid="server-upload-icon">
+                        <Upload className="w-3.5 h-3.5" /> Téléverser
+                        <input type="file" accept="image/*" className="hidden" onChange={(e) => uploadServerImage(e, "icon_url")} />
+                      </label>
+                      {form.icon_url && (
+                        <button onClick={() => setForm((p) => ({ ...p, icon_url: "" }))} className="text-[10px] uppercase tracking-widest text-cc-muted hover:text-cc-danger font-bold">Retirer</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Bannière</label>
+                  <div className="mt-2">
+                    <div className="w-full h-20 bg-cc-base border border-cc-border rounded-md overflow-hidden flex items-center justify-center">
+                      {form.banner_url ? <img src={form.banner_url} alt="banner" className="w-full h-full object-cover" /> : <span className="text-cc-muted text-[10px] uppercase tracking-widest">Aucune bannière</span>}
+                    </div>
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <label className="bg-cc-surface2 border border-cc-border px-3 py-1.5 text-[11px] uppercase tracking-widest font-bold cursor-pointer inline-flex items-center gap-1.5">
+                        <Upload className="w-3.5 h-3.5" /> Téléverser
+                        <input type="file" accept="image/*" className="hidden" onChange={(e) => uploadServerImage(e, "banner_url")} />
+                      </label>
+                      {form.banner_url && (
+                        <button onClick={() => setForm((p) => ({ ...p, banner_url: "" }))} className="text-[10px] uppercase tracking-widest text-cc-muted hover:text-cc-danger font-bold">Retirer</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div>
                 <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Nom</label>
                 <input data-testid="server-edit-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="mt-2 w-full bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2.5" />
@@ -216,7 +360,7 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
                 <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Tags (séparés par virgules, max 8)</label>
                 <input data-testid="server-edit-tags" value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} placeholder="gaming, fr, dev" className="mt-2 w-full bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2.5 font-jetbrains text-xs" />
               </div>
-              <button data-testid="server-edit-save" onClick={save} disabled={saving} className="bg-cc-accent text-white font-bold uppercase tracking-wide px-5 py-2.5 cc-brutal-shadow cc-brutal-press disabled:opacity-50">{saving ? "Enregistrement" : "Enregistrer"}</button>
+              <button data-testid="server-edit-save" onClick={save} disabled={saving} className="bg-cc-accent text-white font-bold uppercase tracking-wide px-5 py-2.5 cc-brutal-shadow cc-brutal-press disabled:opacity-50">{saving ? "Enregistrement…" : "Enregistrer"}</button>
             </div>
           )}
           {tab === "stats" && (
@@ -390,6 +534,111 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
               </ul>
             </div>
           )}
+          {tab === "bots" && (
+            <div>
+              <h3 className="font-display font-extrabold text-2xl uppercase tracking-tighter mb-1 flex items-center gap-2">
+                <Bot className="w-6 h-6 text-cc-accent" /> Bots du serveur
+              </h3>
+              <p className="text-xs text-cc-subtext mb-4">
+                Créez des bots pour automatiser votre serveur. Le token permet au bot de poster des messages via <span className="font-mono">POST /api/bots/message</span> avec l'entête <span className="font-mono">Authorization: Bot &lt;token&gt;</span>.
+              </p>
+
+              {isOwner ? (
+                <div className="border border-cc-border bg-cc-surface2 p-3 mb-5 space-y-2">
+                  <div className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Créer un nouveau bot</div>
+                  <input
+                    value={newBot.name}
+                    onChange={(e) => setNewBot({ ...newBot, name: e.target.value })}
+                    placeholder="Nom du bot (ex: ModerationBot)"
+                    className="w-full bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 text-sm"
+                    maxLength={32}
+                    data-testid="bot-name-input"
+                  />
+                  <div className="flex gap-2 items-center">
+                    <input
+                      value={newBot.avatar_url}
+                      onChange={(e) => setNewBot({ ...newBot, avatar_url: e.target.value })}
+                      placeholder="URL de l'avatar (optionnel)"
+                      className="flex-1 bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 font-jetbrains text-xs"
+                    />
+                    <label className="bg-cc-surface2 border border-cc-border px-3 py-2 text-xs uppercase tracking-widest font-bold cursor-pointer inline-flex items-center gap-1.5 shrink-0">
+                      <Upload className="w-3 h-3" /> Image
+                      <input type="file" accept="image/*" className="hidden" onChange={uploadBotAvatar} />
+                    </label>
+                  </div>
+                  <textarea
+                    value={newBot.description}
+                    onChange={(e) => setNewBot({ ...newBot, description: e.target.value })}
+                    placeholder="Description (optionnel)"
+                    rows={2}
+                    maxLength={300}
+                    className="w-full bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 text-sm"
+                  />
+                  <button
+                    onClick={createBot}
+                    data-testid="bot-create"
+                    className="bg-cc-accent text-white font-bold uppercase tracking-wide px-4 py-2 cc-brutal-shadow cc-brutal-press text-xs inline-flex items-center gap-2"
+                  >
+                    <Bot className="w-3.5 h-3.5" /> Créer le bot
+                  </button>
+                </div>
+              ) : (
+                <div className="border border-cc-border bg-cc-surface2 p-3 mb-4 text-xs text-cc-muted uppercase tracking-widest">
+                  Seul le propriétaire peut créer ou gérer les bots.
+                </div>
+              )}
+
+              <ul className="space-y-2">
+                {bots.map((b) => {
+                  const revealed = revealedTokens[b.bot_id];
+                  return (
+                    <li key={b.bot_id} className="border border-cc-border bg-cc-surface2 p-3" data-testid={`bot-${b.bot_id}`}>
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-cc-base border border-cc-border rounded-md overflow-hidden flex items-center justify-center shrink-0">
+                          {b.avatar_url ? <img src={b.avatar_url} alt="" className="w-full h-full object-cover" /> : <Bot className="w-5 h-5 text-cc-muted" />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-display font-bold flex items-center gap-2 flex-wrap">
+                            {b.name}
+                            <span className="text-[9px] uppercase tracking-widest bg-cc-accent/20 text-cc-accent px-1.5 py-0.5 rounded">BOT</span>
+                          </div>
+                          {b.description && <div className="text-xs text-cc-subtext mt-0.5 truncate">{b.description}</div>}
+                        </div>
+                        {isOwner && (
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button onClick={() => regenBotToken(b)} className="p-1.5 text-cc-muted hover:text-cc-accent" title="Régénérer le token"><RefreshCw className="w-4 h-4" /></button>
+                            <button onClick={() => deleteBot(b)} className="p-1.5 text-cc-muted hover:text-cc-danger" title="Supprimer"><Trash2 className="w-4 h-4" /></button>
+                          </div>
+                        )}
+                      </div>
+                      {b.token && (
+                        <div className="mt-3 bg-cc-base border border-cc-border rounded p-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] uppercase tracking-widest text-cc-muted shrink-0">Token</span>
+                            <code className="flex-1 font-mono text-xs break-all text-cc-subtext min-w-0">
+                              {revealed ? b.token : "•".repeat(Math.min(40, b.token.length))}
+                            </code>
+                            <button
+                              onClick={() => setRevealedTokens((p) => ({ ...p, [b.bot_id]: !revealed }))}
+                              className="p-1 text-cc-muted hover:text-cc-text shrink-0"
+                              title={revealed ? "Masquer" : "Afficher"}
+                            >
+                              {revealed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            </button>
+                            <button onClick={() => copyToClipboard(b.token)} className="p-1 text-cc-muted hover:text-cc-accent shrink-0" title="Copier">
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                          <div className="text-[10px] text-cc-muted mt-1.5 uppercase tracking-widest">⚠ Gardez ce token secret. Utilisez-le comme header : <span className="font-mono normal-case tracking-normal">Bot {revealed ? b.token.slice(0, 8) + "…" : "<token>"}</span></div>
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+                {bots.length === 0 && <li className="text-cc-muted text-xs uppercase tracking-widest">Aucun bot. {isOwner && "Créez-en un ci-dessus."}</li>}
+              </ul>
+            </div>
+          )}
           {tab === "bans" && (
             <ul className="space-y-2">
               {bans.map((b) => (
@@ -415,23 +664,65 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
           )}
           {tab === "danger" && (
             <div className="space-y-4">
-              <div className="border border-cc-border bg-cc-surface2 p-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <ShieldAlert className="w-4 h-4 text-cc-accent" />
-                  <h3 className="font-display font-bold uppercase tracking-tight">Politique anti-DMCA</h3>
-                </div>
-                <p className="text-cc-subtext text-xs leading-relaxed">
-                  Aucun serveur n'est supprimé sauf en cas d'activité illégale confirmée. Vous pouvez archiver votre serveur (lecture seule, masqué) ou le quitter, mais pas le supprimer.
-                </p>
-              </div>
               {!isOwner && (
-                <button onClick={leaveServer} data-testid="leave-server" className="w-full border border-cc-danger text-cc-danger uppercase tracking-widest font-bold py-3 hover:bg-cc-danger hover:text-white transition-colors">Quitter le serveur</button>
+                <>
+                  <div className="border border-cc-border bg-cc-surface2 p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <ShieldAlert className="w-4 h-4 text-cc-accent" />
+                      <h3 className="font-display font-bold uppercase tracking-tight">Membre</h3>
+                    </div>
+                    <p className="text-cc-subtext text-xs leading-relaxed">
+                      Vous pouvez quitter ce serveur à tout moment.
+                    </p>
+                  </div>
+                  <button onClick={leaveServer} data-testid="leave-server" className="w-full border border-cc-danger text-cc-danger uppercase tracking-widest font-bold py-3 hover:bg-cc-danger hover:text-white transition-colors">
+                    Quitter le serveur
+                  </button>
+                </>
               )}
               {isOwner && (
-                <button onClick={archive} data-testid="archive-server" className="w-full border border-cc-border text-cc-text uppercase tracking-widest font-bold py-3 hover:bg-cc-surface2 transition-colors flex items-center justify-center gap-2">
-                  <Archive className="w-4 h-4" /> Archiver le serveur
-                </button>
+                <>
+                  <div className="border border-cc-border bg-cc-surface2 p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Archive className="w-4 h-4 text-cc-accent" />
+                      <h3 className="font-display font-bold uppercase tracking-tight">Archiver</h3>
+                    </div>
+                    <p className="text-cc-subtext text-xs leading-relaxed">
+                      Mettre le serveur en lecture seule et le masquer. Les données restent intactes.
+                    </p>
+                    <button onClick={archive} data-testid="archive-server" className="mt-3 border border-cc-border text-cc-text uppercase tracking-widest font-bold py-2 px-4 hover:bg-cc-surface1 transition-colors inline-flex items-center gap-2 text-xs">
+                      <Archive className="w-3.5 h-3.5" /> Archiver
+                    </button>
+                  </div>
+
+                  <div className="border border-cc-danger/60 bg-cc-danger/5 p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Trash2 className="w-4 h-4 text-cc-danger" />
+                      <h3 className="font-display font-bold uppercase tracking-tight text-cc-danger">Supprimer le serveur</h3>
+                    </div>
+                    <p className="text-cc-subtext text-xs leading-relaxed mb-3">
+                      Suppression <strong>définitive et irréversible</strong> : salons, messages, rôles, membres, invitations, bots — tout sera effacé.
+                      Pour confirmer, tapez le nom exact du serveur : <span className="font-mono text-cc-text">{server.name}</span>
+                    </p>
+                    <input
+                      value={deleteConfirm}
+                      onChange={(e) => setDeleteConfirm(e.target.value)}
+                      placeholder={server.name}
+                      className="w-full bg-cc-base border border-cc-border focus:border-cc-danger outline-none px-3 py-2 text-sm font-mono"
+                      data-testid="delete-server-confirm"
+                    />
+                    <button
+                      onClick={deleteServer}
+                      disabled={deleteConfirm !== server.name}
+                      data-testid="delete-server"
+                      className="mt-3 w-full bg-cc-danger text-white uppercase tracking-widest font-bold py-2.5 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-red-600 transition-colors inline-flex items-center justify-center gap-2 text-xs"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Supprimer définitivement
+                    </button>
+                  </div>
+                </>
               )}
+
               <div className="border border-cc-border bg-cc-surface2 p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <AlertTriangle className="w-4 h-4 text-cc-danger" />

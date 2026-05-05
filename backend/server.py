@@ -828,41 +828,33 @@ async def update_server(server_id: str, payload: UpdateServerIn, user: dict = De
 
 @api.delete("/servers/{server_id}")
 async def delete_server(server_id: str, user: dict = Depends(get_current_user)):
-    """Politique anti-DMCA : un serveur ne peut être supprimé que par un administrateur
-    de la plateforme, et uniquement après confirmation d'activité illégale.
-    Le propriétaire peut seulement archiver ou quitter son serveur."""
-    if user.get("role") != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail=("Suppression refusée. Politique anti-DMCA : aucun serveur n'est supprimé "
-                    "sauf en cas d'activité illégale confirmée par la plateforme. "
-                    "Utilisez « archiver » ou « quitter » à la place.")
-        )
+    """Le propriétaire peut supprimer son serveur (suppression définitive).
+    Les admins plateforme peuvent aussi le supprimer en cas d'activité illégale."""
     server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
     if not server:
         raise HTTPException(status_code=404, detail="Serveur introuvable")
-    # Exiger un signalement actif d'activité illégale validé par admin
-    active_report = await db.reports.find_one({
-        "target_type": "server", "target_id": server_id,
-        "category": "illegal", "status": "validated"
-    }, {"_id": 0})
-    if not active_report:
-        raise HTTPException(
-            status_code=403,
-            detail="Aucun signalement validé d'activité illégale pour ce serveur."
-        )
+    is_owner = server.get("owner_id") == user["user_id"]
+    is_admin = user.get("role") == "admin"
+    if not (is_owner or is_admin):
+        raise HTTPException(status_code=403, detail="Seul le propriétaire peut supprimer ce serveur.")
     await db.servers.delete_one({"server_id": server_id})
     await db.categories.delete_many({"server_id": server_id})
     await db.channels.delete_many({"server_id": server_id})
     await db.roles.delete_many({"server_id": server_id})
     await db.members.delete_many({"server_id": server_id})
     await db.messages.delete_many({"server_id": server_id})
+    await db.invites.delete_many({"server_id": server_id})
+    await db.emojis.delete_many({"server_id": server_id})
+    await db.stickers.delete_many({"server_id": server_id})
+    await db.bans.delete_many({"server_id": server_id})
+    await db.webhooks.delete_many({"server_id": server_id})
+    await db.bots.delete_many({"server_id": server_id})
     await db.audit_log.insert_one({
         "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
-        "action": "server.delete.illegal", "data": {"report_id": active_report.get("report_id")}, "at": now_iso()
+        "action": "server.delete", "data": {"by": "owner" if is_owner else "admin"}, "at": now_iso()
     })
     await hub.broadcast_server(server_id, "server.delete", {"server_id": server_id})
-    return {"ok": True, "reason": "illegal_activity"}
+    return {"ok": True}
 
 @api.post("/servers/{server_id}/archive")
 async def archive_server(server_id: str, user: dict = Depends(get_current_user)):
@@ -1410,19 +1402,99 @@ async def mark_read(user: dict = Depends(get_current_user)):
     await db.notifications.update_many({"user_id": user["user_id"], "read": False}, {"$set": {"read": True}})
     return {"ok": True}
 
-# ========== Voice signaling (basic relay) ==========
+# ========== Voice signaling (hybrid: DM 1-1 + channel N-to-N) ==========
+# In-memory presence: { channel_id: { user_id: {joined_at, display_name, avatar_url} } }
+VOICE_PRESENCE: Dict[str, Dict[str, dict]] = {}
+
 class VoiceSignalIn(BaseModel):
-    target_user_id: str
-    type: str  # offer / answer / ice / hangup
-    payload: Dict[str, Any]
+    # Legacy DM 1-1 fields
+    target_user_id: Optional[str] = None
+    type: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
     dm_id: Optional[str] = None
+    # Channel voice fields
+    channel_id: Optional[str] = None
+    to: Optional[str] = None
+    event: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
 
 @api.post("/voice/signal")
 async def voice_signal(payload: VoiceSignalIn, user: dict = Depends(get_current_user)):
-    await hub.send_user(payload.target_user_id, "voice.signal", {
-        "from": user["user_id"], "type": payload.type, "payload": payload.payload, "dm_id": payload.dm_id
+    # ── Channel-based signaling ──
+    if payload.channel_id:
+        ch = await db.channels.find_one({"channel_id": payload.channel_id}, {"_id": 0})
+        if not ch:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        await require_membership(ch["server_id"], user, PERM_VIEW)
+        msg = {
+            "from": user["user_id"],
+            "channel_id": payload.channel_id,
+            "event": payload.event,
+            "data": payload.data or {},
+        }
+        if payload.to:
+            # Direct to one user in the channel
+            await hub.send_user(payload.to, "voice.signal", msg)
+        else:
+            # Broadcast to all other users currently in the voice channel
+            participants = VOICE_PRESENCE.get(payload.channel_id, {})
+            for uid in list(participants.keys()):
+                if uid != user["user_id"]:
+                    await hub.send_user(uid, "voice.signal", msg)
+        return {"ok": True}
+    # ── Legacy DM 1-1 signaling ──
+    if payload.target_user_id:
+        await hub.send_user(payload.target_user_id, "voice.signal", {
+            "from": user["user_id"], "type": payload.type, "payload": payload.payload, "dm_id": payload.dm_id
+        })
+        return {"ok": True}
+    raise HTTPException(status_code=400, detail="Missing channel_id or target_user_id")
+
+@api.post("/voice/channels/{channel_id}/join")
+async def voice_channel_join(channel_id: str, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    await require_membership(ch["server_id"], user, PERM_VIEW)
+    if ch.get("type") != "voice":
+        raise HTTPException(status_code=400, detail="Not a voice channel")
+    VOICE_PRESENCE.setdefault(channel_id, {})
+    VOICE_PRESENCE[channel_id][user["user_id"]] = {
+        "user_id": user["user_id"],
+        "display_name": user.get("display_name"),
+        "avatar_url": user.get("avatar_url"),
+        "joined_at": now_iso(),
+    }
+    existing = [p for uid, p in VOICE_PRESENCE[channel_id].items() if uid != user["user_id"]]
+    await hub.broadcast_server(ch["server_id"], "voice.presence", {
+        "channel_id": channel_id,
+        "participants": list(VOICE_PRESENCE[channel_id].values()),
     })
+    return {"ok": True, "participants": existing}
+
+@api.post("/voice/channels/{channel_id}/leave")
+async def voice_channel_leave(channel_id: str, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        return {"ok": True}
+    if channel_id in VOICE_PRESENCE:
+        VOICE_PRESENCE[channel_id].pop(user["user_id"], None)
+        if not VOICE_PRESENCE[channel_id]:
+            del VOICE_PRESENCE[channel_id]
+        else:
+            await hub.broadcast_server(ch["server_id"], "voice.presence", {
+                "channel_id": channel_id,
+                "participants": list(VOICE_PRESENCE[channel_id].values()),
+            })
     return {"ok": True}
+
+@api.get("/voice/channels/{channel_id}/participants")
+async def voice_channel_participants(channel_id: str, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    await require_membership(ch["server_id"], user, PERM_VIEW)
+    return list(VOICE_PRESENCE.get(channel_id, {}).values())
 
 # ========== WebSocket ==========
 @api.websocket("/ws")
@@ -1739,6 +1811,146 @@ async def execute_webhook(webhook_id: str, token: str, payload: WebhookExecIn):
     msg["author"] = {"display_name": payload.username or w["name"], "avatar_url": payload.avatar_url, "user_id": "webhook"}
     await hub.broadcast_server(w["server_id"], "message.create", msg)
     return {"ok": True}
+
+# ========== Bots ==========
+class CreateBotIn(BaseModel):
+    name: str = Field(min_length=2, max_length=32)
+    avatar_url: Optional[str] = None
+    description: Optional[str] = Field("", max_length=300)
+
+class UpdateBotIn(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=32)
+    avatar_url: Optional[str] = None
+    description: Optional[str] = Field(None, max_length=300)
+
+class BotMessageIn(BaseModel):
+    channel_id: str
+    content: str = Field(min_length=1, max_length=4000)
+
+def _public_bot(b: dict, reveal_token: bool = False) -> dict:
+    out = {
+        "bot_id": b["bot_id"],
+        "server_id": b["server_id"],
+        "name": b["name"],
+        "avatar_url": b.get("avatar_url"),
+        "description": b.get("description", ""),
+        "creator_id": b.get("creator_id"),
+        "created_at": b.get("created_at"),
+        "is_bot": True,
+    }
+    if reveal_token:
+        out["token"] = b.get("token")
+    return out
+
+@api.post("/servers/{server_id}/bots")
+async def create_bot(server_id: str, payload: CreateBotIn, user: dict = Depends(get_current_user)):
+    """Only the server owner can create bots."""
+    server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
+    if not server:
+        raise HTTPException(status_code=404, detail="Serveur introuvable")
+    if server.get("owner_id") != user["user_id"] and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul le propriétaire peut créer des bots.")
+    # Limit bots per server
+    count = await db.bots.count_documents({"server_id": server_id})
+    if count >= 10:
+        raise HTTPException(status_code=400, detail="Limite de 10 bots par serveur atteinte.")
+    token = secrets.token_urlsafe(40)
+    doc = {
+        "bot_id": gen_id("bot"),
+        "server_id": server_id,
+        "name": payload.name,
+        "avatar_url": payload.avatar_url,
+        "description": payload.description or "",
+        "token": token,
+        "creator_id": user["user_id"],
+        "created_at": now_iso(),
+    }
+    await db.bots.insert_one(doc)
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
+        "action": "bot.create", "data": {"bot_id": doc["bot_id"], "name": doc["name"]}, "at": now_iso()
+    })
+    return _public_bot(doc, reveal_token=True)
+
+@api.get("/servers/{server_id}/bots")
+async def list_bots(server_id: str, user: dict = Depends(get_current_user)):
+    server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
+    if not server:
+        raise HTTPException(status_code=404, detail="Serveur introuvable")
+    is_owner = server.get("owner_id") == user["user_id"] or user.get("role") == "admin"
+    bots = await db.bots.find({"server_id": server_id}, {"_id": 0}).to_list(100)
+    return [_public_bot(b, reveal_token=is_owner) for b in bots]
+
+@api.patch("/servers/{server_id}/bots/{bot_id}")
+async def update_bot(server_id: str, bot_id: str, payload: UpdateBotIn, user: dict = Depends(get_current_user)):
+    server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
+    if not server or (server.get("owner_id") != user["user_id"] and user.get("role") != "admin"):
+        raise HTTPException(status_code=403, detail="Seul le propriétaire peut modifier les bots.")
+    update = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    if update:
+        await db.bots.update_one({"bot_id": bot_id, "server_id": server_id}, {"$set": update})
+    bot = await db.bots.find_one({"bot_id": bot_id, "server_id": server_id}, {"_id": 0})
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot introuvable")
+    return _public_bot(bot, reveal_token=True)
+
+@api.post("/servers/{server_id}/bots/{bot_id}/regen")
+async def regen_bot_token(server_id: str, bot_id: str, user: dict = Depends(get_current_user)):
+    server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
+    if not server or (server.get("owner_id") != user["user_id"] and user.get("role") != "admin"):
+        raise HTTPException(status_code=403, detail="Seul le propriétaire peut régénérer le token.")
+    new_token = secrets.token_urlsafe(40)
+    r = await db.bots.update_one({"bot_id": bot_id, "server_id": server_id}, {"$set": {"token": new_token}})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Bot introuvable")
+    bot = await db.bots.find_one({"bot_id": bot_id, "server_id": server_id}, {"_id": 0})
+    return _public_bot(bot, reveal_token=True)
+
+@api.delete("/servers/{server_id}/bots/{bot_id}")
+async def delete_bot(server_id: str, bot_id: str, user: dict = Depends(get_current_user)):
+    server = await db.servers.find_one({"server_id": server_id}, {"_id": 0})
+    if not server or (server.get("owner_id") != user["user_id"] and user.get("role") != "admin"):
+        raise HTTPException(status_code=403, detail="Seul le propriétaire peut supprimer des bots.")
+    await db.bots.delete_one({"bot_id": bot_id, "server_id": server_id})
+    await db.audit_log.insert_one({
+        "audit_id": gen_id("au"), "server_id": server_id, "actor_id": user["user_id"],
+        "action": "bot.delete", "data": {"bot_id": bot_id}, "at": now_iso()
+    })
+    return {"ok": True}
+
+@api.post("/bots/message")
+async def bot_send_message(payload: BotMessageIn, authorization: Optional[str] = Header(None)):
+    """Bot sends a message. Authorization: Bot <token>"""
+    if not authorization or not authorization.lower().startswith("bot "):
+        raise HTTPException(status_code=401, detail="Authorization header required (Bot <token>)")
+    token = authorization.split(" ", 1)[1].strip()
+    bot = await db.bots.find_one({"token": token}, {"_id": 0})
+    if not bot:
+        raise HTTPException(status_code=401, detail="Token de bot invalide")
+    # Ensure the channel belongs to the bot's server
+    ch = await db.channels.find_one({"channel_id": payload.channel_id}, {"_id": 0})
+    if not ch or ch.get("server_id") != bot["server_id"]:
+        raise HTTPException(status_code=404, detail="Salon introuvable sur ce serveur")
+    if ch.get("type") not in ("text", "announcement"):
+        raise HTTPException(status_code=400, detail="Le bot ne peut poster qu'en salon texte/annonce")
+    msg = {
+        "message_id": gen_id("msg"),
+        "channel_id": payload.channel_id, "server_id": bot["server_id"],
+        "author_id": "bot:" + bot["bot_id"], "bot_id": bot["bot_id"],
+        "bot_name": bot["name"], "bot_avatar": bot.get("avatar_url"),
+        "content": payload.content, "attachments": [], "reactions": [], "pinned": False,
+        "created_at": now_iso(), "edited_at": None, "deleted": False,
+    }
+    await db.messages.insert_one(msg)
+    msg.pop("_id", None)
+    msg["author"] = {
+        "display_name": bot["name"],
+        "avatar_url": bot.get("avatar_url"),
+        "user_id": "bot:" + bot["bot_id"],
+        "is_bot": True,
+    }
+    await hub.broadcast_server(bot["server_id"], "message.create", msg)
+    return {"ok": True, "message_id": msg["message_id"]}
 
 # ========== Notifications ==========
 async def push_notification(user_id: str, kind: str, data: dict):
@@ -2242,6 +2454,8 @@ async def on_startup():
     await db.stickers.create_index([("server_id", 1)])
     await db.user_badges.create_index([("user_id", 1), ("badge", 1)], unique=True)
     await db.servers.create_index([("tags", 1)])
+    await db.bots.create_index([("server_id", 1)])
+    await db.bots.create_index("token", unique=True, sparse=True)
     log.info("Indexes ensured")
 
     # Seed admin

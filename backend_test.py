@@ -1,932 +1,658 @@
 #!/usr/bin/env python3
 """
-CentCord Backend Test Suite - Testing 13 new features
+Backend test suite for CentCord - Testing 3 new features:
+1. Bot system (CRUD + message sending)
+2. Owner delete server
+3. Voice channel signaling
 """
 import requests
 import json
-import time
-from typing import Optional, Dict, Any
+import os
+from pathlib import Path
 
-# Configuration
-BASE_URL = "https://code-check-preview-1.preview.emergentagent.com/api"
-ADMIN_EMAIL = "admin@centcord.app"
-ADMIN_PASSWORD = "CentCordAdmin!2026"
+# Read backend URL from frontend/.env
+env_path = Path(__file__).parent / "frontend" / ".env"
+BACKEND_URL = None
+if env_path.exists():
+    for line in env_path.read_text().splitlines():
+        if line.startswith("REACT_APP_BACKEND_URL="):
+            BACKEND_URL = line.split("=", 1)[1].strip()
+            break
 
-# Test state
-admin_token: Optional[str] = None
-admin_user_id: Optional[str] = None
-test_server_id: Optional[str] = None
-test_channel_id: Optional[str] = None
-test_category_id: Optional[str] = None
-user_b_token: Optional[str] = None
-user_b_id: Optional[str] = None
+if not BACKEND_URL:
+    raise ValueError("REACT_APP_BACKEND_URL not found in /app/frontend/.env")
 
-# Test results
-results = {
-    "passed": [],
-    "failed": [],
-    "warnings": []
-}
+BASE_URL = f"{BACKEND_URL}/api"
+print(f"Testing against: {BASE_URL}")
 
-def log_pass(test_name: str, details: str = ""):
-    print(f"✅ PASS: {test_name}")
-    if details:
-        print(f"   {details}")
-    results["passed"].append(test_name)
+# Test data
+USER_A_EMAIL = "owner_test_a@example.com"
+USER_A_PASSWORD = "SecurePass123!"
+USER_A_NAME = "OwnerUserA"
 
-def log_fail(test_name: str, reason: str):
-    print(f"❌ FAIL: {test_name}")
-    print(f"   Reason: {reason}")
-    results["failed"].append(f"{test_name}: {reason}")
+USER_B_EMAIL = "member_test_b@example.com"
+USER_B_PASSWORD = "SecurePass456!"
+USER_B_NAME = "MemberUserB"
 
-def log_warning(test_name: str, message: str):
-    print(f"⚠️  WARNING: {test_name}")
-    print(f"   {message}")
-    results["warnings"].append(f"{test_name}: {message}")
+TURNSTILE_TOKEN = "XXXX.DUMMY.TOKEN.XXXX"  # Always-pass test token
 
-def make_request(method: str, endpoint: str, token: Optional[str] = None, 
-                 json_data: Optional[Dict] = None, data: Optional[Any] = None,
-                 files: Optional[Dict] = None, params: Optional[Dict] = None) -> requests.Response:
-    """Make HTTP request with optional auth token"""
-    url = f"{BASE_URL}{endpoint}"
-    headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    
-    try:
-        if method == "GET":
-            return requests.get(url, headers=headers, params=params, timeout=30)
-        elif method == "POST":
-            if files:
-                return requests.post(url, headers=headers, files=files, data=data, timeout=30)
-            return requests.post(url, headers=headers, json=json_data, timeout=30)
-        elif method == "PATCH":
-            return requests.patch(url, headers=headers, json=json_data, timeout=30)
-        elif method == "DELETE":
-            return requests.delete(url, headers=headers, timeout=30)
-        elif method == "PUT":
-            return requests.put(url, headers=headers, json=json_data, timeout=30)
-    except Exception as e:
-        print(f"Request error: {e}")
-        raise
+# Global state
+user_a_token = None
+user_b_token = None
+server_id = None
+text_channel_id = None
+voice_channel_id = None
+bot_id = None
+bot_token = None
 
-# ========== Setup Functions ==========
-
-def setup_admin_auth():
-    """Login as admin and get token"""
-    global admin_token, admin_user_id
-    print("\n🔧 Setting up admin authentication...")
-    
-    resp = make_request("POST", "/auth/login", json_data={
-        "email": ADMIN_EMAIL,
-        "password": ADMIN_PASSWORD
-    })
-    
-    if resp.status_code != 200:
-        log_fail("Admin Login", f"Status {resp.status_code}: {resp.text}")
-        return False
-    
-    data = resp.json()
-    admin_token = data.get("access_token")
-    admin_user_id = data.get("user", {}).get("user_id")
-    
-    if not admin_token or not admin_user_id:
-        log_fail("Admin Login", "Missing token or user_id in response")
-        return False
-    
-    log_pass("Admin Login", f"User ID: {admin_user_id}")
-    return True
-
-def setup_test_server():
-    """Create a test server for testing"""
-    global test_server_id, test_channel_id, test_category_id
-    print("\n🔧 Creating test server...")
-    
-    resp = make_request("POST", "/servers", admin_token, json_data={
-        "name": f"Test Server {int(time.time())}",
-        "description": "Server for testing new features",
-        "is_public": True
-    })
-    
-    if resp.status_code != 200:
-        log_fail("Create Test Server", f"Status {resp.status_code}: {resp.text}")
-        return False
-    
-    data = resp.json()
-    test_server_id = data.get("server_id")
-    
-    # Get server details to find channels and categories
-    resp = make_request("GET", f"/servers/{test_server_id}", admin_token)
-    if resp.status_code == 200:
-        server_data = resp.json()
-        channels = server_data.get("channels", [])
-        categories = server_data.get("categories", [])
-        
-        if channels:
-            test_channel_id = channels[0]["channel_id"]
-        if categories:
-            test_category_id = categories[0]["category_id"]
-    
-    log_pass("Create Test Server", f"Server ID: {test_server_id}")
-    return True
-
-def setup_user_b():
-    """Create a second user for testing read markers"""
-    global user_b_token, user_b_id
-    print("\n🔧 Creating second test user...")
-    
-    email = f"testuser_{int(time.time())}@example.com"
-    
-    resp = make_request("POST", "/auth/register", json_data={
+def signup(email, password, display_name):
+    """Sign up a new user"""
+    resp = requests.post(f"{BASE_URL}/auth/register", json={
         "email": email,
-        "password": "TestPassword123!",
-        "display_name": "Test User B",
-        "turnstile_token": "XXXX.DUMMY.TOKEN.XXXX"
+        "password": password,
+        "display_name": display_name,
+        "turnstile_token": TURNSTILE_TOKEN
     })
-    
-    if resp.status_code != 200:
-        log_fail("Create User B", f"Status {resp.status_code}: {resp.text}")
-        return False
-    
+    if resp.status_code in [400, 409]:
+        # User already exists, try login
+        return login(email, password)
+    resp.raise_for_status()
     data = resp.json()
-    user_b_token = data.get("access_token")
-    user_b_id = data.get("user", {}).get("user_id")
-    
-    log_pass("Create User B", f"User ID: {user_b_id}")
-    return True
+    return data.get("access_token")
 
-# ========== Test Functions ==========
-
-def test_1_turnstile_config():
-    """Test 1: Cloudflare Turnstile - GET /api/auth/captcha/config"""
-    print("\n📝 Test 1: Turnstile Config")
-    
-    resp = make_request("GET", "/auth/captcha/config")
-    
-    if resp.status_code != 200:
-        log_fail("Turnstile Config", f"Status {resp.status_code}")
-        return
-    
-    data = resp.json()
-    if "site_key" not in data or "enabled" not in data:
-        log_fail("Turnstile Config", f"Missing fields in response: {data}")
-        return
-    
-    log_pass("Turnstile Config", f"site_key={data['site_key']}, enabled={data['enabled']}")
-
-def test_2_turnstile_register_without_token():
-    """Test 2: Register without turnstile_token should fail"""
-    print("\n📝 Test 2: Register without Turnstile Token")
-    
-    email = f"notoken_{int(time.time())}@example.com"
-    resp = make_request("POST", "/auth/register", json_data={
+def login(email, password):
+    """Login and return access token"""
+    resp = requests.post(f"{BASE_URL}/auth/login", json={
         "email": email,
-        "password": "TestPass123!",
-        "display_name": "No Token User"
+        "password": password
     })
-    
-    if resp.status_code == 400:
-        if "Captcha" in resp.text or "captcha" in resp.text.lower():
-            log_pass("Register without Token", "Correctly rejected with 400")
-        else:
-            log_fail("Register without Token", f"Got 400 but wrong message: {resp.text}")
-    else:
-        log_fail("Register without Token", f"Expected 400, got {resp.status_code}")
-
-def test_3_turnstile_register_with_token():
-    """Test 3: Register with always-pass test token should succeed"""
-    print("\n📝 Test 3: Register with Turnstile Token")
-    
-    email = f"withtoken_{int(time.time())}@example.com"
-    resp = make_request("POST", "/auth/register", json_data={
-        "email": email,
-        "password": "TestPass123!",
-        "display_name": "With Token User",
-        "turnstile_token": "XXXX.DUMMY.TOKEN.XXXX"
-    })
-    
-    if resp.status_code == 200:
-        data = resp.json()
-        if "user" in data and "access_token" in data:
-            log_pass("Register with Token", f"User created: {data['user'].get('user_id')}")
-        else:
-            log_fail("Register with Token", f"Missing fields in response: {data}")
-    else:
-        log_fail("Register with Token", f"Status {resp.status_code}: {resp.text}")
-
-def test_4_server_invite_regen():
-    """Test 4: Server invite code regeneration"""
-    print("\n📝 Test 4: Server Invite Regen")
-    
-    if not test_server_id:
-        log_fail("Server Invite Regen", "No test server available")
-        return
-    
-    # Get original invite code
-    resp = make_request("GET", f"/servers/{test_server_id}", admin_token)
-    if resp.status_code != 200:
-        log_fail("Server Invite Regen", f"Failed to get server: {resp.status_code}")
-        return
-    
-    original_code = resp.json().get("invite_code")
-    
-    # Regenerate
-    resp = make_request("POST", f"/servers/{test_server_id}/invite/regen", admin_token)
-    
-    if resp.status_code != 200:
-        log_fail("Server Invite Regen", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    new_code = resp.json().get("invite_code")
-    
-    if not new_code:
-        log_fail("Server Invite Regen", "No invite_code in response")
-        return
-    
-    if new_code == original_code:
-        log_fail("Server Invite Regen", "Invite code did not change")
-        return
-    
-    # Verify it's updated in server
-    resp = make_request("GET", f"/servers/{test_server_id}", admin_token)
-    if resp.status_code == 200:
-        current_code = resp.json().get("invite_code")
-        if current_code == new_code:
-            log_pass("Server Invite Regen", f"Old: {original_code}, New: {new_code}")
-        else:
-            log_fail("Server Invite Regen", f"Code not updated in server: {current_code}")
-    else:
-        log_warning("Server Invite Regen", "Could not verify code update")
-
-def test_5_category_update():
-    """Test 5: Category update (name should be uppercased)"""
-    print("\n📝 Test 5: Category Update")
-    
-    if not test_server_id or not test_category_id:
-        log_fail("Category Update", "No test server/category available")
-        return
-    
-    resp = make_request("PATCH", f"/servers/{test_server_id}/categories/{test_category_id}", 
-                       admin_token, json_data={"name": "renamed_cat"})
-    
-    if resp.status_code != 200:
-        log_fail("Category Update", f"Status {resp.status_code}: {resp.text}")
-        return
-    
+    resp.raise_for_status()
     data = resp.json()
-    new_name = data.get("name")
-    
-    if new_name == "RENAMED_CAT":
-        log_pass("Category Update", f"Name uppercased correctly: {new_name}")
-    else:
-        log_fail("Category Update", f"Expected 'RENAMED_CAT', got '{new_name}'")
+    return data.get("access_token")
 
-def test_6_read_markers():
-    """Test 6: Read markers and unread counts"""
-    print("\n📝 Test 6: Read Markers / Unread")
+def headers(token):
+    """Return authorization headers"""
+    return {"Authorization": f"Bearer {token}"}
+
+def test_setup():
+    """Setup: Create 2 users, create server as user A, have user B join"""
+    global user_a_token, user_b_token, server_id, text_channel_id, voice_channel_id
     
-    if not test_server_id or not test_channel_id or not user_b_token:
-        log_fail("Read Markers", "Missing test server/channel/user_b")
-        return
+    print("\n=== SETUP ===")
     
-    # Add user B to the server first
+    # Create/login user A
+    print("Creating user A (owner)...")
+    user_a_token = signup(USER_A_EMAIL, USER_A_PASSWORD, USER_A_NAME)
+    print(f"✓ User A token: {user_a_token[:20]}...")
+    
+    # Create/login user B
+    print("Creating user B (member)...")
+    user_b_token = signup(USER_B_EMAIL, USER_B_PASSWORD, USER_B_NAME)
+    print(f"✓ User B token: {user_b_token[:20]}...")
+    
+    # Create server as user A
+    print("Creating server as user A...")
+    resp = requests.post(f"{BASE_URL}/servers", 
+        headers=headers(user_a_token),
+        json={"name": "Test Bot Server", "description": "Testing bots", "is_public": False}
+    )
+    resp.raise_for_status()
+    server_data = resp.json()
+    server_id = server_data["server_id"]
+    print(f"✓ Server created: {server_id}")
+    
+    # Get server details to find default channel
+    resp = requests.get(f"{BASE_URL}/servers/{server_id}", headers=headers(user_a_token))
+    resp.raise_for_status()
+    server = resp.json()
+    
+    # Find or create text channel
+    text_channels = [ch for ch in server.get("channels", []) if ch.get("type") == "text"]
+    if text_channels:
+        text_channel_id = text_channels[0]["channel_id"]
+        print(f"✓ Using existing text channel: {text_channel_id}")
+    else:
+        # Create text channel
+        resp = requests.post(f"{BASE_URL}/servers/{server_id}/channels",
+            headers=headers(user_a_token),
+            json={"name": "test-text", "type": "text"}
+        )
+        resp.raise_for_status()
+        text_channel_id = resp.json()["channel_id"]
+        print(f"✓ Created text channel: {text_channel_id}")
+    
+    # Create voice channel
+    print("Creating voice channel...")
+    resp = requests.post(f"{BASE_URL}/servers/{server_id}/channels",
+        headers=headers(user_a_token),
+        json={"name": "test-voice", "type": "voice"}
+    )
+    resp.raise_for_status()
+    voice_channel_id = resp.json()["channel_id"]
+    print(f"✓ Created voice channel: {voice_channel_id}")
+    
     # Get invite code
-    resp = make_request("GET", f"/servers/{test_server_id}", admin_token)
-    if resp.status_code != 200:
-        log_fail("Read Markers", "Failed to get server invite")
-        return
+    resp = requests.get(f"{BASE_URL}/servers/{server_id}", headers=headers(user_a_token))
+    resp.raise_for_status()
+    invite_code = resp.json().get("invite_code")
+    print(f"✓ Invite code: {invite_code}")
     
+    # User B joins server
+    print("User B joining server...")
+    resp = requests.post(f"{BASE_URL}/invites/{invite_code}", headers=headers(user_b_token))
+    resp.raise_for_status()
+    print("✓ User B joined server")
+    
+    print("✓ Setup complete\n")
+
+# ========== BOT SYSTEM TESTS ==========
+
+def test_bot_create_as_owner():
+    """Test: Owner can create bot and receives token"""
+    global bot_id, bot_token
+    print("TEST: Create bot as owner")
+    
+    resp = requests.post(f"{BASE_URL}/servers/{server_id}/bots",
+        headers=headers(user_a_token),
+        json={"name": "TestBot", "description": "hello", "avatar_url": None}
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert "bot_id" in data, "Missing bot_id"
+    assert "name" in data, "Missing name"
+    assert data["name"] == "TestBot", f"Expected name 'TestBot', got {data['name']}"
+    assert "token" in data, "Missing token (owner should see token)"
+    assert data.get("is_bot") == True, "Missing or incorrect is_bot field"
+    
+    bot_id = data["bot_id"]
+    bot_token = data["token"]
+    print(f"✓ Bot created: {bot_id}, token: {bot_token[:20]}...")
+
+def test_bot_create_as_non_owner():
+    """Test: Non-owner cannot create bot (403)"""
+    print("TEST: Create bot as non-owner (should fail)")
+    
+    resp = requests.post(f"{BASE_URL}/servers/{server_id}/bots",
+        headers=headers(user_b_token),
+        json={"name": "UnauthorizedBot", "description": "test"}
+    )
+    assert resp.status_code == 403, f"Expected 403, got {resp.status_code}: {resp.text}"
+    assert "propriétaire" in resp.text.lower(), "Expected French error message about owner"
+    print("✓ Non-owner correctly rejected (403)")
+
+def test_bot_list_owner_sees_token():
+    """Test: Owner sees token in bot list"""
+    print("TEST: List bots as owner (should see token)")
+    
+    resp = requests.get(f"{BASE_URL}/servers/{server_id}/bots", headers=headers(user_a_token))
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    bots = resp.json()
+    assert isinstance(bots, list), "Expected list of bots"
+    assert len(bots) > 0, "Expected at least one bot"
+    
+    bot = bots[0]
+    assert "token" in bot, "Owner should see token field"
+    assert bot["token"] == bot_token, "Token mismatch"
+    print("✓ Owner sees token in bot list")
+
+def test_bot_list_non_owner_no_token():
+    """Test: Non-owner does NOT see token in bot list"""
+    print("TEST: List bots as non-owner (should NOT see token)")
+    
+    resp = requests.get(f"{BASE_URL}/servers/{server_id}/bots", headers=headers(user_b_token))
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    bots = resp.json()
+    assert isinstance(bots, list), "Expected list of bots"
+    assert len(bots) > 0, "Expected at least one bot"
+    
+    bot = bots[0]
+    assert "token" not in bot, "Non-owner should NOT see token field"
+    print("✓ Non-owner does not see token")
+
+def test_bot_regen_token():
+    """Test: Owner can regenerate bot token"""
+    global bot_token
+    print("TEST: Regenerate bot token")
+    
+    old_token = bot_token
+    resp = requests.post(f"{BASE_URL}/servers/{server_id}/bots/{bot_id}/regen",
+        headers=headers(user_a_token)
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert "token" in data, "Missing token in response"
+    new_token = data["token"]
+    assert new_token != old_token, "Token should be different after regeneration"
+    
+    bot_token = new_token
+    print(f"✓ Token regenerated: {new_token[:20]}... (different from old)")
+
+def test_bot_update():
+    """Test: Owner can update bot description"""
+    print("TEST: Update bot description")
+    
+    resp = requests.patch(f"{BASE_URL}/servers/{server_id}/bots/{bot_id}",
+        headers=headers(user_a_token),
+        json={"description": "updated"}
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert data.get("description") == "updated", f"Expected 'updated', got {data.get('description')}"
+    print("✓ Bot description updated")
+
+def test_bot_send_message():
+    """Test: Bot can send message with valid token"""
+    print("TEST: Bot sends message to text channel")
+    
+    resp = requests.post(f"{BASE_URL}/bots/message",
+        headers={"Authorization": f"Bot {bot_token}"},
+        json={"channel_id": text_channel_id, "content": "Hello from bot!"}
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert "message_id" in data, "Missing message_id"
+    message_id = data["message_id"]
+    print(f"✓ Bot message sent: {message_id}")
+    
+    # Verify message appears in channel with bot fields
+    print("  Verifying message in channel...")
+    resp = requests.get(f"{BASE_URL}/channels/{text_channel_id}/messages", headers=headers(user_a_token))
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    messages = resp.json()
+    bot_messages = [m for m in messages if m.get("message_id") == message_id]
+    assert len(bot_messages) > 0, "Bot message not found in channel"
+    
+    bot_msg = bot_messages[0]
+    # Check for bot fields (bot_id, bot_name, bot_avatar)
+    assert bot_msg.get("bot_id") == bot_id, f"Expected bot_id {bot_id}, got {bot_msg.get('bot_id')}"
+    assert bot_msg.get("bot_name") == "TestBot", f"Expected bot_name 'TestBot', got {bot_msg.get('bot_name')}"
+    assert bot_msg.get("author_id", "").startswith("bot:"), "author_id should start with 'bot:'"
+    
+    # Check if author field exists and has is_bot (may be None if not enriched)
+    author = bot_msg.get("author")
+    if author:
+        assert author.get("is_bot") == True, "Author should have is_bot: true"
+        assert author.get("display_name") == "TestBot", f"Expected display_name 'TestBot', got {author.get('display_name')}"
+        print("  ✓ Message verified: is_bot=true, display_name=TestBot")
+    else:
+        print("  ✓ Message verified: bot_id and bot_name fields present (author enrichment may be missing)")
+
+def test_bot_send_message_invalid_token():
+    """Test: Bot message with invalid token returns 401"""
+    print("TEST: Bot message with invalid token (should fail)")
+    
+    resp = requests.post(f"{BASE_URL}/bots/message",
+        headers={"Authorization": "Bot invalid_token_12345"},
+        json={"channel_id": text_channel_id, "content": "Should fail"}
+    )
+    assert resp.status_code == 401, f"Expected 401, got {resp.status_code}: {resp.text}"
+    print("✓ Invalid token correctly rejected (401)")
+
+def test_bot_send_message_to_voice_channel():
+    """Test: Bot cannot post to voice channel (400)"""
+    print("TEST: Bot message to voice channel (should fail)")
+    
+    resp = requests.post(f"{BASE_URL}/bots/message",
+        headers={"Authorization": f"Bot {bot_token}"},
+        json={"channel_id": voice_channel_id, "content": "Should fail"}
+    )
+    assert resp.status_code == 400, f"Expected 400, got {resp.status_code}: {resp.text}"
+    assert "texte" in resp.text.lower() or "annonce" in resp.text.lower(), "Expected error about text/announcement channels"
+    print("✓ Voice channel posting correctly rejected (400)")
+
+def test_bot_delete_as_non_owner():
+    """Test: Non-owner cannot delete bot (403)"""
+    print("TEST: Delete bot as non-owner (should fail)")
+    
+    resp = requests.delete(f"{BASE_URL}/servers/{server_id}/bots/{bot_id}",
+        headers=headers(user_b_token)
+    )
+    assert resp.status_code == 403, f"Expected 403, got {resp.status_code}: {resp.text}"
+    print("✓ Non-owner delete correctly rejected (403)")
+
+def test_bot_delete_as_owner():
+    """Test: Owner can delete bot"""
+    print("TEST: Delete bot as owner")
+    
+    resp = requests.delete(f"{BASE_URL}/servers/{server_id}/bots/{bot_id}",
+        headers=headers(user_a_token)
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert data.get("ok") == True, "Expected {ok: true}"
+    print("✓ Bot deleted successfully")
+
+# ========== OWNER DELETE SERVER TESTS ==========
+
+def test_delete_server_as_non_owner():
+    """Test: Non-owner cannot delete server (403)"""
+    print("TEST: Delete server as non-owner (should fail)")
+    
+    resp = requests.delete(f"{BASE_URL}/servers/{server_id}", headers=headers(user_b_token))
+    assert resp.status_code == 403, f"Expected 403, got {resp.status_code}: {resp.text}"
+    assert "propriétaire" in resp.text.lower(), "Expected French error about owner"
+    print("✓ Non-owner delete correctly rejected (403)")
+
+def test_delete_server_as_owner():
+    """Test: Owner can delete server"""
+    print("TEST: Delete server as owner")
+    
+    resp = requests.delete(f"{BASE_URL}/servers/{server_id}", headers=headers(user_a_token))
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert data.get("ok") == True, "Expected {ok: true}"
+    print("✓ Server deleted successfully")
+    
+    # Verify server is gone (404 or 403 - user no longer has access)
+    print("  Verifying server is deleted...")
+    resp = requests.get(f"{BASE_URL}/servers/{server_id}", headers=headers(user_a_token))
+    assert resp.status_code in [403, 404], f"Expected 403 or 404 after delete, got {resp.status_code}"
+    print(f"  ✓ Server returns {resp.status_code} after deletion")
+    
+    # Verify server not in user's server list
+    print("  Verifying server not in user's list...")
+    resp = requests.get(f"{BASE_URL}/servers", headers=headers(user_a_token))
+    resp.raise_for_status()
+    servers = resp.json()
+    server_ids = [s["server_id"] for s in servers]
+    assert server_id not in server_ids, "Deleted server should not appear in user's server list"
+    print("  ✓ Server not in user's list")
+
+# ========== VOICE CHANNEL SIGNALING TESTS ==========
+
+def test_voice_setup():
+    """Setup for voice tests: Create new server with voice channel"""
+    global server_id, voice_channel_id
+    
+    print("\n=== VOICE TESTS SETUP ===")
+    
+    # Create new server
+    print("Creating new server for voice tests...")
+    resp = requests.post(f"{BASE_URL}/servers", 
+        headers=headers(user_a_token),
+        json={"name": "Voice Test Server", "description": "Testing voice", "is_public": False}
+    )
+    resp.raise_for_status()
+    server_id = resp.json()["server_id"]
+    print(f"✓ Server created: {server_id}")
+    
+    # Create voice channel
+    resp = requests.post(f"{BASE_URL}/servers/{server_id}/channels",
+        headers=headers(user_a_token),
+        json={"name": "voice-test", "type": "voice"}
+    )
+    resp.raise_for_status()
+    voice_channel_id = resp.json()["channel_id"]
+    print(f"✓ Voice channel created: {voice_channel_id}")
+    
+    # User B joins server
+    resp = requests.get(f"{BASE_URL}/servers/{server_id}", headers=headers(user_a_token))
+    resp.raise_for_status()
     invite_code = resp.json().get("invite_code")
     
-    # Join server as user B
-    resp = make_request("POST", f"/invites/{invite_code}", user_b_token)
-    if resp.status_code not in [200, 409]:  # 409 if already joined
-        log_fail("Read Markers", f"User B failed to join server: {resp.status_code}")
-        return
-    
-    # Send 3 messages as admin
-    for i in range(3):
-        resp = make_request("POST", f"/channels/{test_channel_id}/messages", admin_token,
-                          json_data={"content": f"Test message {i+1} for unread"})
-        if resp.status_code != 200:
-            log_fail("Read Markers", f"Failed to send message {i+1}")
-            return
-        time.sleep(0.2)
-    
-    # Check unread as user B
-    resp = make_request("GET", "/channels/unread", user_b_token)
-    if resp.status_code != 200:
-        log_fail("Read Markers", f"Failed to get unread: {resp.status_code}")
-        return
-    
-    unread_data = resp.json()
-    if test_channel_id not in unread_data:
-        log_fail("Read Markers", f"Channel not in unread map: {unread_data}")
-        return
-    
-    count_before = unread_data[test_channel_id]
-    if count_before < 3:
-        log_warning("Read Markers", f"Expected at least 3 unread, got {count_before}")
-    
-    # Mark as read
-    resp = make_request("POST", f"/channels/{test_channel_id}/read", user_b_token, json_data={})
-    if resp.status_code != 200:
-        log_fail("Read Markers", f"Failed to mark as read: {resp.status_code}")
-        return
-    
-    # Check unread again
-    resp = make_request("GET", "/channels/unread", user_b_token)
-    if resp.status_code != 200:
-        log_fail("Read Markers", f"Failed to get unread after marking: {resp.status_code}")
-        return
-    
-    unread_after = resp.json()
-    count_after = unread_after.get(test_channel_id, 0)
-    
-    if count_after == 0:
-        log_pass("Read Markers", f"Unread count: {count_before} → {count_after}")
-    else:
-        log_fail("Read Markers", f"Expected 0 unread after marking, got {count_after}")
+    resp = requests.post(f"{BASE_URL}/invites/{invite_code}", headers=headers(user_b_token))
+    resp.raise_for_status()
+    print("✓ User B joined server\n")
 
-def test_7_server_stats():
-    """Test 7: Server statistics"""
-    print("\n📝 Test 7: Server Stats")
-    
-    if not test_server_id:
-        log_fail("Server Stats", "No test server available")
-        return
-    
-    resp = make_request("GET", f"/servers/{test_server_id}/stats", admin_token)
-    
-    if resp.status_code != 200:
-        log_fail("Server Stats", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    data = resp.json()
-    required_fields = ["member_count", "online_count", "message_count", "messages_7d", 
-                      "channel_count", "role_count", "boost_count"]
-    
-    missing = [f for f in required_fields if f not in data]
-    if missing:
-        log_fail("Server Stats", f"Missing fields: {missing}")
-        return
-    
-    # Check all are numbers
-    non_numeric = [f for f in required_fields if not isinstance(data[f], int)]
-    if non_numeric:
-        log_fail("Server Stats", f"Non-numeric fields: {non_numeric}")
-        return
-    
-    log_pass("Server Stats", f"member_count={data['member_count']}, message_count={data['message_count']}")
-    
-    # Test non-member access (should be 403)
-    # Create a new user who is not a member
-    email = f"nonmember_{int(time.time())}@example.com"
-    resp = make_request("POST", "/auth/register", json_data={
-        "email": email,
-        "password": "TestPass123!",
-        "display_name": "Non Member",
-        "turnstile_token": "XXXX.DUMMY.TOKEN.XXXX"
-    })
-    
-    if resp.status_code == 200:
-        non_member_token = resp.json().get("access_token")
-        resp = make_request("GET", f"/servers/{test_server_id}/stats", non_member_token)
-        if resp.status_code == 403:
-            log_pass("Server Stats (Non-member)", "Correctly rejected with 403")
-        else:
-            log_fail("Server Stats (Non-member)", f"Expected 403, got {resp.status_code}")
-
-def test_8_user_activity():
-    """Test 8: User custom activity"""
-    print("\n📝 Test 8: User Activity")
-    
-    # Set activity
-    resp = make_request("PATCH", "/users/me/activity", admin_token, json_data={
-        "activity_type": "playing",
-        "activity_text": "Cyberpunk 2077",
-        "activity_emoji": "🎮"
-    })
-    
-    if resp.status_code != 200:
-        log_fail("User Activity (Set)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    # Verify in /auth/me
-    resp = make_request("GET", "/auth/me", admin_token)
-    if resp.status_code != 200:
-        log_fail("User Activity (Verify)", f"Failed to get /auth/me: {resp.status_code}")
-        return
-    
-    data = resp.json()
-    if (data.get("activity_type") == "playing" and 
-        data.get("activity_text") == "Cyberpunk 2077" and
-        data.get("activity_emoji") == "🎮"):
-        log_pass("User Activity (Set)", "Activity set correctly")
-    else:
-        log_fail("User Activity (Set)", f"Activity not set correctly: {data}")
-        return
-    
-    # Clear activity
-    resp = make_request("PATCH", "/users/me/activity", admin_token, json_data={})
-    if resp.status_code != 200:
-        log_fail("User Activity (Clear)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    # Verify cleared
-    resp = make_request("GET", "/auth/me", admin_token)
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get("activity_type") is None:
-            log_pass("User Activity (Clear)", "Activity cleared successfully")
-        else:
-            log_fail("User Activity (Clear)", f"Activity not cleared: {data}")
-
-def test_9_stickers():
-    """Test 9: Sticker system (CRUD + send)"""
-    print("\n📝 Test 9: Stickers")
-    
-    if not test_server_id or not test_channel_id:
-        log_fail("Stickers", "No test server/channel available")
-        return
-    
-    # Create sticker
-    resp = make_request("POST", f"/servers/{test_server_id}/stickers", admin_token, json_data={
-        "name": "thumbsup",
-        "image_url": "https://example.com/thumbsup.png"
-    })
-    
-    if resp.status_code != 200:
-        log_fail("Stickers (Create)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    sticker_data = resp.json()
-    sticker_id = sticker_data.get("sticker_id")
-    
-    if not sticker_id:
-        log_fail("Stickers (Create)", "No sticker_id in response")
-        return
-    
-    log_pass("Stickers (Create)", f"Sticker ID: {sticker_id}")
-    
-    # List stickers
-    resp = make_request("GET", f"/servers/{test_server_id}/stickers", admin_token)
-    if resp.status_code != 200:
-        log_fail("Stickers (List)", f"Status {resp.status_code}")
-        return
-    
-    stickers = resp.json()
-    if not any(s.get("sticker_id") == sticker_id for s in stickers):
-        log_fail("Stickers (List)", "Created sticker not in list")
-        return
-    
-    log_pass("Stickers (List)", f"Found {len(stickers)} stickers")
-    
-    # Send sticker as message
-    resp = make_request("POST", "/stickers/send", admin_token, json_data={
-        "channel_id": test_channel_id,
-        "sticker_id": sticker_id
-    })
-    
-    if resp.status_code != 200:
-        log_fail("Stickers (Send)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    msg_data = resp.json()
-    if msg_data.get("type") == "sticker" and msg_data.get("sticker", {}).get("name") == "thumbsup":
-        log_pass("Stickers (Send)", f"Message type=sticker, name=thumbsup")
-    else:
-        log_fail("Stickers (Send)", f"Wrong message format: {msg_data}")
-        return
-    
-    # Test name validation (too short)
-    resp = make_request("POST", f"/servers/{test_server_id}/stickers", admin_token, json_data={
-        "name": "a",
-        "image_url": "https://example.com/a.png"
-    })
-    
-    if resp.status_code in [400, 422]:
-        log_pass("Stickers (Validation)", "Short name correctly rejected")
-    else:
-        log_fail("Stickers (Validation)", f"Expected 400/422 for short name, got {resp.status_code}")
-    
-    # Delete sticker
-    resp = make_request("DELETE", f"/servers/{test_server_id}/stickers/{sticker_id}", admin_token)
-    if resp.status_code == 200:
-        log_pass("Stickers (Delete)", "Sticker deleted successfully")
-    else:
-        log_fail("Stickers (Delete)", f"Status {resp.status_code}")
-
-def test_10_server_tags():
-    """Test 10: Server tags + tag-based discovery"""
-    print("\n📝 Test 10: Server Tags")
-    
-    if not test_server_id:
-        log_fail("Server Tags", "No test server available")
-        return
-    
-    # Set tags
-    resp = make_request("PATCH", f"/servers/{test_server_id}/tags", admin_token, json_data={
-        "tags": ["Gaming", "FR", "DEV", "-bad-", "ok ok"]
-    })
-    
-    if resp.status_code != 200:
-        log_fail("Server Tags (Set)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    data = resp.json()
-    tags = data.get("tags", [])
-    
-    # Should be sanitized - check that bad tags are removed/cleaned
-    # "-bad-" should become "bad" or be removed, "ok ok" should become "okok"
-    if "gaming" in tags and "fr" in tags and "dev" in tags:
-        log_pass("Server Tags (Set)", f"Tags sanitized: {tags}")
-    else:
-        log_fail("Server Tags (Set)", f"Expected gaming/fr/dev in tags, got {tags}")
-        return
-    
-    # Make server public for discovery
-    resp = make_request("PATCH", f"/servers/{test_server_id}", admin_token, json_data={
-        "is_public": True
-    })
-    
-    # Discover by tag
-    resp = make_request("GET", "/servers/discover/by-tag/gaming", admin_token)
-    if resp.status_code != 200:
-        log_fail("Server Tags (Discover)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    servers = resp.json()
-    if any(s.get("server_id") == test_server_id for s in servers):
-        log_pass("Server Tags (Discover)", f"Server found in 'gaming' tag results")
-    else:
-        log_fail("Server Tags (Discover)", f"Server not found in tag results")
-
-def test_11_badges():
-    """Test 11: Badges system"""
-    print("\n📝 Test 11: Badges")
-    
-    # Get badge catalog
-    resp = make_request("GET", "/badges/list")
-    if resp.status_code != 200:
-        log_fail("Badges (List)", f"Status {resp.status_code}")
-        return
-    
-    badges = resp.json()
-    if len(badges) != 7:
-        log_fail("Badges (List)", f"Expected 7 badges, got {len(badges)}")
-        return
-    
-    badge_ids = [b.get("id") for b in badges]
-    expected_ids = ["admin", "nitro", "early", "boost", "dev", "mod", "partner"]
-    if set(badge_ids) == set(expected_ids):
-        log_pass("Badges (List)", f"All 7 badges present")
-    else:
-        log_fail("Badges (List)", f"Missing badges: {set(expected_ids) - set(badge_ids)}")
-        return
-    
-    # Award badge to user B (as admin)
-    if not user_b_id:
-        log_fail("Badges (Award)", "No user B available")
-        return
-    
-    resp = make_request("POST", "/admin/badges", admin_token, json_data={
-        "user_id": user_b_id,
-        "badge": "early"
-    })
-    
-    if resp.status_code != 200:
-        log_fail("Badges (Award)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    log_pass("Badges (Award)", "Badge 'early' awarded to user B")
-    
-    # Get user badges
-    resp = make_request("GET", f"/users/{user_b_id}/badges")
-    if resp.status_code != 200:
-        log_fail("Badges (Get User)", f"Status {resp.status_code}")
-        return
-    
-    user_badges = resp.json()
-    if any(b.get("id") == "early" for b in user_badges):
-        log_pass("Badges (Get User)", "Badge 'early' found in user badges")
-    else:
-        log_fail("Badges (Get User)", f"Badge 'early' not found: {user_badges}")
-        return
-    
-    # Try awarding same badge again (should be 409)
-    resp = make_request("POST", "/admin/badges", admin_token, json_data={
-        "user_id": user_b_id,
-        "badge": "early"
-    })
-    
-    if resp.status_code == 409:
-        log_pass("Badges (Duplicate)", "Duplicate badge correctly rejected with 409")
-    else:
-        log_fail("Badges (Duplicate)", f"Expected 409, got {resp.status_code}")
-    
-    # Test non-admin cannot award (if user_b_token exists)
-    if user_b_token:
-        resp = make_request("POST", "/admin/badges", user_b_token, json_data={
-            "user_id": admin_user_id,
-            "badge": "dev"
-        })
-        
-        if resp.status_code == 403:
-            log_pass("Badges (Non-admin)", "Non-admin correctly rejected with 403")
-        else:
-            log_fail("Badges (Non-admin)", f"Expected 403, got {resp.status_code}")
-    
-    # Revoke badge
-    resp = make_request("DELETE", f"/admin/badges/{user_b_id}/early", admin_token)
-    if resp.status_code == 200:
-        log_pass("Badges (Revoke)", "Badge revoked successfully")
-    else:
-        log_fail("Badges (Revoke)", f"Status {resp.status_code}")
-
-def test_12_polls():
-    """Test 12: Poll get + end"""
-    print("\n📝 Test 12: Polls")
-    
-    if not test_channel_id:
-        log_fail("Polls", "No test channel available")
-        return
-    
-    # Create a poll
-    resp = make_request("POST", "/polls", admin_token, json_data={
-        "channel_id": test_channel_id,
-        "question": "What's your favorite color?",
-        "options": ["Red", "Blue", "Green"],
-        "multi": False,
-        "expires_in_minutes": 60
-    })
-    
-    if resp.status_code != 200:
-        log_fail("Polls (Create)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    msg_data = resp.json()
-    poll_data = msg_data.get("poll")
-    if not poll_data:
-        log_fail("Polls (Create)", "No poll in message")
-        return
-    
-    poll_id = poll_data.get("poll_id")
-    if not poll_id:
-        log_fail("Polls (Create)", "No poll_id")
-        return
-    
-    log_pass("Polls (Create)", f"Poll ID: {poll_id}")
-    
-    # Get poll
-    resp = make_request("GET", f"/polls/{poll_id}", admin_token)
-    if resp.status_code != 200:
-        log_fail("Polls (Get)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    poll = resp.json()
-    if poll.get("poll_id") == poll_id and poll.get("question") == "What's your favorite color?":
-        log_pass("Polls (Get)", "Poll retrieved successfully")
-    else:
-        log_fail("Polls (Get)", f"Wrong poll data: {poll}")
-        return
-    
-    # End poll as author
-    resp = make_request("POST", f"/polls/{poll_id}/end", admin_token)
-    if resp.status_code != 200:
-        log_fail("Polls (End)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    # Verify ended
-    resp = make_request("GET", f"/polls/{poll_id}", admin_token)
-    if resp.status_code == 200:
-        poll = resp.json()
-        if poll.get("ended") is True:
-            log_pass("Polls (End)", "Poll ended successfully")
-        else:
-            log_fail("Polls (End)", f"Poll not marked as ended: {poll}")
-    
-    # Test non-author non-mod cannot end (if user_b exists and is member)
-    if user_b_token:
-        # Create another poll
-        resp = make_request("POST", "/polls", admin_token, json_data={
-            "channel_id": test_channel_id,
-            "question": "Test poll 2",
-            "options": ["A", "B"],
-            "multi": False,
-            "expires_in_minutes": 60
-        })
-        
-        if resp.status_code == 200:
-            poll2_id = resp.json().get("poll", {}).get("poll_id")
-            if poll2_id:
-                resp = make_request("POST", f"/polls/{poll2_id}/end", user_b_token)
-                if resp.status_code == 403:
-                    log_pass("Polls (Non-author)", "Non-author correctly rejected with 403")
-                else:
-                    log_fail("Polls (Non-author)", f"Expected 403, got {resp.status_code}")
-
-def test_13_mention_perms():
-    """Test 13: Channel mention permissions"""
-    print("\n📝 Test 13: Mention Permissions")
-    
-    if not test_server_id or not test_channel_id:
-        log_fail("Mention Perms", "No test server/channel available")
-        return
-    
-    # Set mention perms
-    resp = make_request("PATCH", f"/channels/{test_channel_id}/mention-perms", admin_token, json_data={
-        "allow_everyone": False,
-        "allow_role_ping": True
-    })
-    
-    if resp.status_code != 200:
-        log_fail("Mention Perms (Set)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    data = resp.json()
-    if data.get("mention_allow_everyone") is False:
-        log_pass("Mention Perms (Set)", "Permissions set correctly")
-    else:
-        log_fail("Mention Perms (Set)", f"Wrong response: {data}")
-        return
-    
-    # Verify in server data
-    resp = make_request("GET", f"/servers/{test_server_id}", admin_token)
-    if resp.status_code == 200:
-        server_data = resp.json()
-        channels = server_data.get("channels", [])
-        target_ch = next((ch for ch in channels if ch["channel_id"] == test_channel_id), None)
-        
-        if target_ch and target_ch.get("mention_allow_everyone") is False:
-            log_pass("Mention Perms (Verify)", "Permissions persisted in channel")
-        else:
-            log_fail("Mention Perms (Verify)", f"Permissions not found in channel: {target_ch}")
-
-def test_14_gif_trending():
-    """Test 14: GIF trending endpoint"""
-    print("\n📝 Test 14: GIF Trending")
-    
-    # Get all trending
-    resp = make_request("GET", "/gifs/trending", admin_token)
-    if resp.status_code != 200:
-        log_fail("GIF Trending (All)", f"Status {resp.status_code}: {resp.text}")
-        return
-    
-    gifs = resp.json()
-    if len(gifs) != 12:
-        log_fail("GIF Trending (All)", f"Expected 12 GIFs, got {len(gifs)}")
-        return
-    
-    # Check structure
-    first_gif = gifs[0]
-    required_fields = ["id", "title", "url", "preview"]
-    missing = [f for f in required_fields if f not in first_gif]
-    if missing:
-        log_fail("GIF Trending (All)", f"Missing fields in GIF: {missing}")
-        return
-    
-    log_pass("GIF Trending (All)", f"Got {len(gifs)} GIFs with correct structure")
-    
-    # Search with query
-    resp = make_request("GET", "/gifs/trending", admin_token, params={"q": "clap"})
-    if resp.status_code != 200:
-        log_fail("GIF Trending (Search)", f"Status {resp.status_code}")
-        return
-    
-    search_gifs = resp.json()
-    if len(search_gifs) >= 1:
-        if any("clap" in g.get("title", "").lower() for g in search_gifs):
-            log_pass("GIF Trending (Search)", f"Found {len(search_gifs)} GIFs matching 'clap'")
-        else:
-            log_fail("GIF Trending (Search)", "No GIFs contain 'clap' in title")
-    else:
-        log_fail("GIF Trending (Search)", "No results for 'clap'")
-
-def test_15_hybrid_storage():
-    """Test 15: Hybrid storage (upload + retrieve)"""
-    print("\n📝 Test 15: Hybrid Storage")
-    
-    # Check if uploads endpoint exists
-    resp = make_request("GET", f"/servers/{test_server_id}", admin_token)
-    if resp.status_code != 200:
-        log_fail("Hybrid Storage", "Cannot verify server")
-        return
-    
-    # Create a small test image (1x1 PNG)
-    import base64
-    # 1x1 red pixel PNG
-    png_data = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+def test_voice_join_first_user():
+    """Test: First user joins voice channel (empty participants)"""
+    print("TEST: User A joins voice channel (first joiner)")
+    
+    resp = requests.post(f"{BASE_URL}/voice/channels/{voice_channel_id}/join",
+        headers=headers(user_a_token)
     )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
     
-    # Try to upload
-    files = {"file": ("test.png", png_data, "image/png")}
-    
-    try:
-        url = f"{BASE_URL}/uploads"
-        headers = {"Authorization": f"Bearer {admin_token}"}
-        resp = requests.post(url, headers=headers, files=files, timeout=30)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            file_url = data.get("url")
-            
-            if not file_url:
-                log_fail("Hybrid Storage (Upload)", "No URL in response")
-                return
-            
-            log_pass("Hybrid Storage (Upload)", f"File uploaded: {file_url}")
-            
-            # Try to retrieve the file - construct full URL if relative
-            if file_url.startswith("/"):
-                # Relative URL, construct full URL
-                base = BASE_URL.rsplit("/api", 1)[0]  # Get base without /api
-                full_url = base + file_url
-            else:
-                full_url = file_url
-            
-            get_resp = requests.get(full_url, timeout=30)
-            if get_resp.status_code == 200:
-                content_type = get_resp.headers.get("Content-Type", "")
-                if "image" in content_type or len(get_resp.content) > 0:
-                    log_pass("Hybrid Storage (Retrieve)", f"File retrieved, size={len(get_resp.content)}, type={content_type}")
-                else:
-                    log_fail("Hybrid Storage (Retrieve)", f"Wrong content: {content_type}")
-            else:
-                log_fail("Hybrid Storage (Retrieve)", f"Status {get_resp.status_code}")
-        elif resp.status_code == 404:
-            log_warning("Hybrid Storage", "Upload endpoint not found (404) - may not be implemented")
-        else:
-            log_fail("Hybrid Storage (Upload)", f"Status {resp.status_code}: {resp.text}")
-    except Exception as e:
-        log_warning("Hybrid Storage", f"Upload test failed: {e}")
+    data = resp.json()
+    assert data.get("ok") == True, "Expected ok: true"
+    assert "participants" in data, "Missing participants field"
+    assert isinstance(data["participants"], list), "participants should be a list"
+    assert len(data["participants"]) == 0, "First joiner should see empty participants list"
+    print("✓ User A joined, participants: []")
 
-# ========== Main Test Runner ==========
+def test_voice_join_second_user():
+    """Test: Second user joins and sees first user in participants"""
+    print("TEST: User B joins voice channel (should see user A)")
+    
+    resp = requests.post(f"{BASE_URL}/voice/channels/{voice_channel_id}/join",
+        headers=headers(user_b_token)
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert data.get("ok") == True, "Expected ok: true"
+    assert "participants" in data, "Missing participants field"
+    participants = data["participants"]
+    assert len(participants) >= 1, "Should see at least user A in participants"
+    
+    # Verify participant structure
+    p = participants[0]
+    assert "user_id" in p, "Missing user_id"
+    assert "display_name" in p, "Missing display_name"
+    assert "avatar_url" in p, "Missing avatar_url"
+    assert "joined_at" in p, "Missing joined_at"
+    print(f"✓ User B joined, participants: {len(participants)} (includes user A)")
+
+def test_voice_get_participants():
+    """Test: GET participants returns both users"""
+    print("TEST: Get voice channel participants")
+    
+    resp = requests.get(f"{BASE_URL}/voice/channels/{voice_channel_id}/participants",
+        headers=headers(user_a_token)
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    participants = resp.json()
+    assert isinstance(participants, list), "Expected list of participants"
+    assert len(participants) == 2, f"Expected 2 participants, got {len(participants)}"
+    print(f"✓ Participants: {len(participants)} users")
+
+def test_voice_signal_direct():
+    """Test: Direct signal to specific user"""
+    print("TEST: Voice signal direct to user B")
+    
+    # Get user B's ID
+    resp = requests.get(f"{BASE_URL}/auth/me", headers=headers(user_b_token))
+    resp.raise_for_status()
+    user_b_id = resp.json()["user_id"]
+    
+    resp = requests.post(f"{BASE_URL}/voice/signal",
+        headers=headers(user_a_token),
+        json={
+            "channel_id": voice_channel_id,
+            "event": "offer",
+            "data": {"sdp": "test"},
+            "to": user_b_id
+        }
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert data.get("ok") == True, "Expected ok: true"
+    print("✓ Direct signal sent successfully")
+
+def test_voice_signal_broadcast():
+    """Test: Broadcast signal to all participants"""
+    print("TEST: Voice signal broadcast (no 'to' field)")
+    
+    resp = requests.post(f"{BASE_URL}/voice/signal",
+        headers=headers(user_a_token),
+        json={
+            "channel_id": voice_channel_id,
+            "event": "join",
+            "data": {"name": "A"}
+        }
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert data.get("ok") == True, "Expected ok: true"
+    print("✓ Broadcast signal sent successfully")
+
+def test_voice_signal_legacy_dm():
+    """Test: Legacy DM signaling (target_user_id)"""
+    print("TEST: Voice signal legacy DM form")
+    
+    # Get user B's ID
+    resp = requests.get(f"{BASE_URL}/auth/me", headers=headers(user_b_token))
+    resp.raise_for_status()
+    user_b_id = resp.json()["user_id"]
+    
+    resp = requests.post(f"{BASE_URL}/voice/signal",
+        headers=headers(user_a_token),
+        json={
+            "target_user_id": user_b_id,
+            "type": "offer",
+            "payload": {"sdp": "x"}
+        }
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert data.get("ok") == True, "Expected ok: true"
+    print("✓ Legacy DM signal sent successfully")
+
+def test_voice_signal_missing_both():
+    """Test: Signal with neither channel_id nor target_user_id (400)"""
+    print("TEST: Voice signal with neither channel_id nor target_user_id (should fail)")
+    
+    resp = requests.post(f"{BASE_URL}/voice/signal",
+        headers=headers(user_a_token),
+        json={
+            "event": "test",
+            "data": {}
+        }
+    )
+    assert resp.status_code == 400, f"Expected 400, got {resp.status_code}: {resp.text}"
+    print("✓ Missing both fields correctly rejected (400)")
+
+def test_voice_leave():
+    """Test: User leaves voice channel"""
+    print("TEST: User A leaves voice channel")
+    
+    resp = requests.post(f"{BASE_URL}/voice/channels/{voice_channel_id}/leave",
+        headers=headers(user_a_token)
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    
+    data = resp.json()
+    assert data.get("ok") == True, "Expected ok: true"
+    print("✓ User A left voice channel")
+    
+    # Verify only user B remains
+    print("  Verifying participants...")
+    resp = requests.get(f"{BASE_URL}/voice/channels/{voice_channel_id}/participants",
+        headers=headers(user_b_token)
+    )
+    resp.raise_for_status()
+    participants = resp.json()
+    assert len(participants) == 1, f"Expected 1 participant after leave, got {len(participants)}"
+    print("  ✓ Only user B remains")
+
+def test_voice_signal_non_member():
+    """Test: Signal to channel where user is not a member (should fail)"""
+    print("TEST: Voice signal to channel where user is not a member")
+    
+    # Create a new server with voice channel (user A only)
+    resp = requests.post(f"{BASE_URL}/servers", 
+        headers=headers(user_a_token),
+        json={"name": "Private Voice Server", "is_public": False}
+    )
+    resp.raise_for_status()
+    private_server_id = resp.json()["server_id"]
+    
+    resp = requests.post(f"{BASE_URL}/servers/{private_server_id}/channels",
+        headers=headers(user_a_token),
+        json={"name": "private-voice", "type": "voice"}
+    )
+    resp.raise_for_status()
+    private_voice_id = resp.json()["channel_id"]
+    
+    # User B tries to signal to this channel (not a member)
+    resp = requests.post(f"{BASE_URL}/voice/signal",
+        headers=headers(user_b_token),
+        json={
+            "channel_id": private_voice_id,
+            "event": "test",
+            "data": {}
+        }
+    )
+    # Should be 403 or 404, not 500
+    assert resp.status_code in [403, 404], f"Expected 403 or 404, got {resp.status_code}: {resp.text}"
+    print(f"✓ Non-member signal correctly rejected ({resp.status_code})")
+
+# ========== MAIN TEST RUNNER ==========
 
 def main():
-    print("=" * 70)
-    print("CentCord Backend Test Suite - 13 New Features")
-    print("=" * 70)
+    print("=" * 60)
+    print("CentCord Backend Test Suite - 3 New Features")
+    print("=" * 60)
     
-    # Setup
-    if not setup_admin_auth():
-        print("\n❌ Failed to authenticate admin. Aborting tests.")
-        return
+    try:
+        # Setup
+        test_setup()
+        
+        # Bot system tests
+        print("\n" + "=" * 60)
+        print("BOT SYSTEM TESTS")
+        print("=" * 60)
+        test_bot_create_as_owner()
+        test_bot_create_as_non_owner()
+        test_bot_list_owner_sees_token()
+        test_bot_list_non_owner_no_token()
+        test_bot_regen_token()
+        test_bot_update()
+        test_bot_send_message()
+        test_bot_send_message_invalid_token()
+        test_bot_send_message_to_voice_channel()
+        test_bot_delete_as_non_owner()
+        test_bot_delete_as_owner()
+        
+        # Owner delete server tests
+        print("\n" + "=" * 60)
+        print("OWNER DELETE SERVER TESTS")
+        print("=" * 60)
+        test_delete_server_as_non_owner()
+        test_delete_server_as_owner()
+        
+        # Voice signaling tests
+        print("\n" + "=" * 60)
+        print("VOICE CHANNEL SIGNALING TESTS")
+        print("=" * 60)
+        test_voice_setup()
+        test_voice_join_first_user()
+        test_voice_join_second_user()
+        test_voice_get_participants()
+        test_voice_signal_direct()
+        test_voice_signal_broadcast()
+        test_voice_signal_legacy_dm()
+        test_voice_signal_missing_both()
+        test_voice_leave()
+        test_voice_signal_non_member()
+        
+        print("\n" + "=" * 60)
+        print("✅ ALL TESTS PASSED")
+        print("=" * 60)
+        
+    except AssertionError as e:
+        print(f"\n❌ TEST FAILED: {e}")
+        return 1
+    except Exception as e:
+        print(f"\n❌ ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
     
-    if not setup_test_server():
-        print("\n❌ Failed to create test server. Some tests will be skipped.")
-    
-    if not setup_user_b():
-        print("\n⚠️  Failed to create user B. Some tests will be skipped.")
-    
-    # Run all tests
-    print("\n" + "=" * 70)
-    print("Running Tests")
-    print("=" * 70)
-    
-    test_1_turnstile_config()
-    test_2_turnstile_register_without_token()
-    test_3_turnstile_register_with_token()
-    test_4_server_invite_regen()
-    test_5_category_update()
-    test_6_read_markers()
-    test_7_server_stats()
-    test_8_user_activity()
-    test_9_stickers()
-    test_10_server_tags()
-    test_11_badges()
-    test_12_polls()
-    test_13_mention_perms()
-    test_14_gif_trending()
-    test_15_hybrid_storage()
-    
-    # Summary
-    print("\n" + "=" * 70)
-    print("TEST SUMMARY")
-    print("=" * 70)
-    print(f"✅ Passed: {len(results['passed'])}")
-    print(f"❌ Failed: {len(results['failed'])}")
-    print(f"⚠️  Warnings: {len(results['warnings'])}")
-    
-    if results['failed']:
-        print("\n❌ FAILED TESTS:")
-        for fail in results['failed']:
-            print(f"   - {fail}")
-    
-    if results['warnings']:
-        print("\n⚠️  WARNINGS:")
-        for warn in results['warnings']:
-            print(f"   - {warn}")
-    
-    print("\n" + "=" * 70)
-    
-    if len(results['failed']) == 0:
-        print("🎉 ALL TESTS PASSED!")
-    else:
-        print(f"⚠️  {len(results['failed'])} test(s) failed")
-    
-    print("=" * 70)
+    return 0
 
 if __name__ == "__main__":
-    main()
+    exit(main())

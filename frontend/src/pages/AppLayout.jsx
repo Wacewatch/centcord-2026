@@ -3,6 +3,7 @@ import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import api from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useWS } from "../lib/ws";
+import { MobileProvider, useMobile } from "../lib/mobile";
 import ServerRail from "../components/ServerRail";
 import DMHome from "../components/DMHome";
 import DMView from "../components/DMView";
@@ -14,10 +15,11 @@ import CreateServerModal from "../components/modals/CreateServerModal";
 import JoinServerModal from "../components/modals/JoinServerModal";
 import { toast } from "sonner";
 
-export default function AppLayout() {
+function AppShell() {
   const { user } = useAuth();
   const ws = useWS();
   const navigate = useNavigate();
+  const { isMobile, drawerOpen, closeDrawer } = useMobile();
   const [servers, setServers] = useState([]);
   const [openCreate, setOpenCreate] = useState(false);
   const [openJoin, setOpenJoin] = useState(false);
@@ -35,7 +37,7 @@ export default function AppLayout() {
     if (!ws) return;
     const offDelete = ws.subscribe("server.delete", () => loadServers());
     const offUpdate = ws.subscribe("server.update", () => loadServers());
-    const offKick = ws.subscribe("kicked", (d) => {
+    const offKick = ws.subscribe("kicked", () => {
       toast.error("Vous avez été retiré·e d'un serveur");
       loadServers();
       navigate("/app/me");
@@ -43,8 +45,26 @@ export default function AppLayout() {
     return () => { offDelete(); offUpdate(); offKick(); };
   }, [ws, loadServers, navigate]);
 
+  // Close drawer when switching routes on mobile
+  useEffect(() => {
+    if (isMobile && drawerOpen) {
+      const unlisten = () => closeDrawer();
+      window.addEventListener("popstate", unlisten);
+      return () => window.removeEventListener("popstate", unlisten);
+    }
+  }, [isMobile, drawerOpen, closeDrawer]);
+
   return (
-    <div className="h-screen w-screen flex bg-cc-base text-cc-text overflow-hidden">
+    <div className="h-[100dvh] w-screen flex bg-cc-base text-cc-text overflow-hidden relative">
+      {/* Mobile backdrop */}
+      {isMobile && drawerOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-30"
+          onClick={closeDrawer}
+          aria-hidden
+        />
+      )}
+
       <ServerRail
         servers={servers}
         onCreate={() => setOpenCreate(true)}
@@ -65,5 +85,13 @@ export default function AppLayout() {
       {openCreate && <CreateServerModal onClose={() => setOpenCreate(false)} onCreated={(s) => { loadServers(); navigate(`/app/servers/${s.server_id}`); }} />}
       {openJoin && <JoinServerModal onClose={() => setOpenJoin(false)} onJoined={(s) => { loadServers(); navigate(`/app/servers/${s.server_id}`); }} />}
     </div>
+  );
+}
+
+export default function AppLayout() {
+  return (
+    <MobileProvider>
+      <AppShell />
+    </MobileProvider>
   );
 }
