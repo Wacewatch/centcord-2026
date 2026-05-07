@@ -57,6 +57,11 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
   // Auto-mod
   const [automod, setAutomod] = useState(null);
   const [automodWordsInput, setAutomodWordsInput] = useState("");
+  // Roles editor
+  const [members, setMembers] = useState([]);
+  const [editingRoleId, setEditingRoleId] = useState(null); // null | "new" | role_id
+  const [roleForm, setRoleForm] = useState({ name: "", color: "#FF3B00", permissions: 3, mentionable: true });
+  const [memberFilter, setMemberFilter] = useState("");
   // Delete confirmation
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const isOwner = server.owner_id === user?.user_id;
@@ -74,6 +79,7 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
       setAutomod(r.data);
       setAutomodWordsInput((r.data?.words || []).join(", "));
     }).catch(() => {});
+    if (tab === "roles") api.get(`/servers/${server.server_id}/members`).then(r => setMembers(r.data)).catch(() => {});
   }, [tab, server.server_id]);
 
   const save = async () => {
@@ -285,6 +291,87 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
     toast.success("Copié");
   };
 
+  // ── Roles editor ──
+  const PERM_DEFS = [
+    { bit: 0,  key: "view",             label: "Voir le serveur",           desc: "Voir les salons et les membres." },
+    { bit: 1,  key: "send",             label: "Envoyer des messages",      desc: "Écrire dans les salons texte." },
+    { bit: 2,  key: "manage_messages",  label: "Gérer les messages",        desc: "Supprimer / épingler les messages, contourner l'auto-mod." },
+    { bit: 3,  key: "manage_channels",  label: "Gérer les salons",          desc: "Créer, modifier, supprimer salons et catégories." },
+    { bit: 4,  key: "manage_server",    label: "Gérer le serveur",          desc: "Modifier nom, tags, auto-mod, icône, stats." },
+    { bit: 5,  key: "kick",             label: "Expulser des membres",      desc: "Retirer un membre du serveur." },
+    { bit: 6,  key: "ban",              label: "Bannir des membres",        desc: "Interdire l'accès définitif au serveur." },
+    { bit: 7,  key: "manage_roles",     label: "Gérer les rôles",           desc: "Créer / modifier les rôles et les assigner." },
+    { bit: 8,  key: "mention_everyone", label: "Mentionner @everyone",      desc: "Ping tout le serveur via @everyone / @here." },
+    { bit: 31, key: "administrator",    label: "Administrateur",            desc: "Active toutes les permissions et contourne les restrictions.", danger: true },
+  ];
+  const hasPerm = (perms, bit) => Math.floor((perms || 0) / Math.pow(2, bit)) % 2 === 1;
+  const togglePerm = (perms, bit) => {
+    const v = Math.pow(2, bit);
+    return hasPerm(perms, bit) ? (perms - v) : (perms + v);
+  };
+
+  const openCreateRole = () => {
+    setEditingRoleId("new");
+    setRoleForm({ name: "Nouveau rôle", color: "#FF3B00", permissions: 3, mentionable: true });
+  };
+  const openEditRole = (r) => {
+    setEditingRoleId(r.role_id);
+    setRoleForm({
+      name: r.name || "",
+      color: r.color || "#FF3B00",
+      permissions: r.permissions || 0,
+      mentionable: r.mentionable !== false,
+    });
+    setMemberFilter("");
+  };
+  const cancelEditRole = () => setEditingRoleId(null);
+
+  const saveRole = async () => {
+    if (!roleForm.name.trim()) { toast.error("Nom requis"); return; }
+    try {
+      if (editingRoleId === "new") {
+        await api.post(`/servers/${server.server_id}/roles`, roleForm);
+        toast.success("Rôle créé");
+      } else {
+        await api.patch(`/servers/${server.server_id}/roles/${editingRoleId}`, roleForm);
+        toast.success("Rôle enregistré");
+      }
+      setEditingRoleId(null);
+      reload && reload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Échec");
+    }
+  };
+
+  const removeRole = async (r) => {
+    if (r.is_default) { toast.error("Impossible de supprimer le rôle par défaut"); return; }
+    if (!window.confirm(`Supprimer le rôle « ${r.name} » ?`)) return;
+    try {
+      await api.delete(`/servers/${server.server_id}/roles/${r.role_id}`);
+      toast.success("Rôle supprimé");
+      if (editingRoleId === r.role_id) setEditingRoleId(null);
+      reload && reload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Échec");
+    }
+  };
+
+  const toggleMemberRole = async (member, roleId) => {
+    const hasRole = (member.role_ids || []).includes(roleId);
+    const newIds = hasRole
+      ? member.role_ids.filter((id) => id !== roleId)
+      : [...(member.role_ids || []), roleId];
+    // optimistic
+    setMembers((prev) => prev.map((m) => m.user_id === member.user_id ? { ...m, role_ids: newIds } : m));
+    try {
+      await api.patch(`/servers/${server.server_id}/members/${member.user_id}`, { role_ids: newIds });
+    } catch (e) {
+      // rollback
+      setMembers((prev) => prev.map((m) => m.user_id === member.user_id ? { ...m, role_ids: member.role_ids || [] } : m));
+      toast.error(e?.response?.data?.detail || "Échec");
+    }
+  };
+
   // ── Delete server (owner) ──
   const deleteServer = async () => {
     if (deleteConfirm !== server.name) {
@@ -460,17 +547,146 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
           )}
           {tab === "roles" && (
             <div>
-              <ul className="space-y-2">
-                {(server.roles || []).map((r) => (
-                  <li key={r.role_id} className="border border-cc-border bg-cc-surface2 px-3 py-2 flex items-center gap-3">
-                    <span className="w-3 h-3" style={{ background: r.color }} />
-                    <span className="font-display font-bold">{r.name}</span>
-                    {r.is_default && <span className="text-[9px] uppercase tracking-widest text-cc-muted">par défaut</span>}
-                    <span className="ml-auto text-[10px] uppercase tracking-widest text-cc-muted">perms : {r.permissions}</span>
-                  </li>
-                ))}
-              </ul>
-              <p className="text-xs text-cc-muted mt-3 uppercase tracking-widest">UI permissions personnalisées en V2.</p>
+              {editingRoleId === null ? (
+                <>
+                  <div className="flex items-center justify-between mb-4 gap-2">
+                    <h3 className="font-display font-extrabold text-2xl uppercase tracking-tighter">Rôles</h3>
+                    <button onClick={openCreateRole} data-testid="role-create" className="bg-cc-accent text-white font-bold uppercase tracking-wide text-xs px-3 py-2 cc-brutal-shadow cc-brutal-press">+ Créer un rôle</button>
+                  </div>
+                  <p className="text-[10px] uppercase tracking-widest text-cc-muted mb-3">
+                    Cliquez sur un rôle pour modifier son nom, sa couleur, ses permissions et les membres qui le portent.
+                  </p>
+                  <ul className="space-y-2">
+                    {(server.roles || []).map((r) => {
+                      const count = members.filter((m) => (m.role_ids || []).includes(r.role_id)).length;
+                      const isAdminRole = hasPerm(r.permissions, 31);
+                      return (
+                        <li key={r.role_id} data-testid={`role-row-${r.role_id}`} className="border border-cc-border bg-cc-surface2 px-3 py-2 flex items-center gap-3">
+                          <span className="w-3 h-3 rounded-sm shrink-0 border border-black/20" style={{ background: r.color }} />
+                          <span className="font-display font-bold truncate" style={{ color: r.color }}>{r.name}</span>
+                          {r.is_default && <span className="text-[9px] uppercase tracking-widest text-cc-muted shrink-0">par défaut</span>}
+                          {isAdminRole && <span className="text-[9px] uppercase tracking-widest text-cc-accent shrink-0 font-bold">admin</span>}
+                          <span className="text-[10px] uppercase tracking-widest text-cc-muted ml-2 shrink-0">{count} membre{count > 1 ? "s" : ""}</span>
+                          <div className="ml-auto flex items-center gap-3 shrink-0">
+                            <button onClick={() => openEditRole(r)} data-testid={`role-edit-${r.role_id}`} className="text-[10px] uppercase tracking-widest font-bold text-cc-accent hover:text-cc-text">Modifier</button>
+                            {!r.is_default && <button onClick={() => removeRole(r)} data-testid={`role-delete-${r.role_id}`} className="text-[10px] uppercase tracking-widest font-bold text-cc-muted hover:text-cc-danger">Supprimer</button>}
+                          </div>
+                        </li>
+                      );
+                    })}
+                    {(!server.roles || server.roles.length === 0) && (
+                      <li className="text-cc-muted text-xs uppercase tracking-widest">Aucun rôle défini.</li>
+                    )}
+                  </ul>
+                </>
+              ) : (
+                <div className="space-y-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="font-display font-extrabold text-2xl uppercase tracking-tighter truncate">
+                      {editingRoleId === "new" ? "Nouveau rôle" : `Modifier « ${roleForm.name || "rôle"} »`}
+                    </h3>
+                    <button onClick={cancelEditRole} data-testid="role-back" className="text-[10px] uppercase tracking-widest text-cc-muted hover:text-cc-text shrink-0">← Retour</button>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Nom</label>
+                    <input value={roleForm.name} onChange={(e) => setRoleForm({ ...roleForm, name: e.target.value })} maxLength={64} className="mt-2 w-full bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2" data-testid="role-edit-name" />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">Couleur</label>
+                    <div className="mt-2 flex items-center gap-2 flex-wrap">
+                      <input type="color" value={roleForm.color} onChange={(e) => setRoleForm({ ...roleForm, color: e.target.value })} className="w-12 h-10 bg-cc-base border border-cc-border cursor-pointer" data-testid="role-edit-color" />
+                      <input value={roleForm.color} onChange={(e) => setRoleForm({ ...roleForm, color: e.target.value })} className="w-28 bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 font-jetbrains text-xs uppercase" />
+                      <div className="flex gap-1 flex-wrap">
+                        {["#FF3B00", "#F59E0B", "#EAB308", "#10B981", "#06B6D4", "#3B82F6", "#8B5CF6", "#EC4899", "#64748B", "#FFFFFF"].map((c) => (
+                          <button key={c} onClick={() => setRoleForm({ ...roleForm, color: c })} className="w-7 h-7 border border-cc-border hover:scale-110 transition-transform" style={{ background: c }} title={c} aria-label={`couleur ${c}`} />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" checked={roleForm.mentionable} onChange={(e) => setRoleForm({ ...roleForm, mentionable: e.target.checked })} className="accent-cc-accent w-4 h-4" data-testid="role-edit-mentionable" />
+                    <span className="text-sm">Mentionnable — autoriser <span className="font-mono">@{(roleForm.name || "role").toLowerCase().replace(/\s+/g, "-")}</span></span>
+                  </label>
+
+                  <div>
+                    <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase block mb-2">Permissions</label>
+                    <div className="border border-cc-border bg-cc-surface2 divide-y divide-cc-border">
+                      {PERM_DEFS.map((p) => {
+                        const adminOn = hasPerm(roleForm.permissions, 31);
+                        const checked = hasPerm(roleForm.permissions, p.bit);
+                        const effectivelyOn = p.bit === 31 ? checked : (checked || adminOn);
+                        const disabled = p.bit !== 31 && adminOn;
+                        return (
+                          <label key={p.key} className={`flex items-start gap-3 p-3 transition-colors ${p.danger ? "bg-cc-accent/10" : ""} ${disabled ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:bg-cc-surface1"}`}>
+                            <input type="checkbox" checked={effectivelyOn} disabled={disabled} onChange={() => setRoleForm({ ...roleForm, permissions: togglePerm(roleForm.permissions, p.bit) })} className="accent-cc-accent w-4 h-4 mt-0.5 shrink-0" data-testid={`role-perm-${p.key}`} />
+                            <div className="min-w-0">
+                              <div className={`text-sm font-bold ${p.danger ? "text-cc-accent uppercase tracking-wider" : ""}`}>{p.label}</div>
+                              <div className="text-[10px] text-cc-muted mt-0.5">{p.desc}</div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {hasPerm(roleForm.permissions, 31) && (
+                      <p className="text-[10px] uppercase tracking-widest text-cc-accent mt-2 font-bold">⚠ Administrateur activé — toutes les autres permissions sont implicitement accordées.</p>
+                    )}
+                  </div>
+
+                  {editingRoleId !== "new" && (
+                    <div>
+                      <div className="flex items-center justify-between mb-2 gap-2">
+                        <label className="text-[10px] tracking-[0.3em] font-bold text-cc-muted uppercase">
+                          Membres ({members.filter((m) => (m.role_ids || []).includes(editingRoleId)).length})
+                        </label>
+                        <input value={memberFilter} onChange={(e) => setMemberFilter(e.target.value)} placeholder="Filtrer…" className="w-40 bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-2 py-1 text-xs" data-testid="role-member-filter" />
+                      </div>
+                      <div className="border border-cc-border bg-cc-surface2 max-h-56 overflow-y-auto divide-y divide-cc-border">
+                        {members
+                          .filter((m) => {
+                            if (!memberFilter) return true;
+                            const q = memberFilter.toLowerCase();
+                            return (m.nickname || "").toLowerCase().includes(q) || (m.user?.display_name || "").toLowerCase().includes(q) || (m.user?.email || "").toLowerCase().includes(q);
+                          })
+                          .map((m) => {
+                            const has = (m.role_ids || []).includes(editingRoleId);
+                            return (
+                              <label key={m.user_id} className="flex items-center gap-3 p-2 cursor-pointer hover:bg-cc-surface1">
+                                <input type="checkbox" checked={has} onChange={() => toggleMemberRole(m, editingRoleId)} className="accent-cc-accent w-4 h-4 shrink-0" data-testid={`role-member-${m.user_id}`} />
+                                <div className="w-7 h-7 bg-cc-base border border-cc-border rounded-full overflow-hidden flex items-center justify-center text-[10px] font-bold shrink-0">
+                                  {m.user?.avatar_url ? <img src={m.user.avatar_url} alt="" className="w-full h-full object-cover" /> : initials(m.user?.display_name || "?")}
+                                </div>
+                                <span className="text-sm truncate flex-1">{m.nickname || m.user?.display_name || "—"}</span>
+                                {server.owner_id === m.user_id && <span className="text-[9px] uppercase tracking-widest text-cc-accent shrink-0">propriétaire</span>}
+                              </label>
+                            );
+                          })}
+                        {members.length === 0 && <div className="p-3 text-xs text-cc-muted text-center uppercase tracking-widest">Aucun membre.</div>}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex gap-2 pt-2 flex-wrap">
+                    <button onClick={saveRole} data-testid="role-save" className="bg-cc-accent text-white font-bold uppercase tracking-wide px-5 py-2.5 cc-brutal-shadow cc-brutal-press">
+                      {editingRoleId === "new" ? "Créer le rôle" : "Enregistrer"}
+                    </button>
+                    <button onClick={cancelEditRole} className="bg-cc-surface2 border border-cc-border text-cc-text font-bold uppercase tracking-wide px-5 py-2.5 text-sm">Annuler</button>
+                    {editingRoleId !== "new" && (() => {
+                      const r = (server.roles || []).find((x) => x.role_id === editingRoleId);
+                      if (r && !r.is_default) {
+                        return (
+                          <button onClick={() => removeRole(r)} className="ml-auto text-cc-danger hover:text-cc-accent font-bold uppercase tracking-wide text-xs px-3 py-2.5 border border-cc-danger/40">
+                            Supprimer le rôle
+                          </button>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           {tab === "invites" && (
