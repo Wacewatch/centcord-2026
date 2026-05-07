@@ -220,6 +220,58 @@ async def require_membership(server_id: str, user: dict, perm: int = PERM_VIEW) 
         raise HTTPException(status_code=403, detail="Missing permissions")
     return perms
 
+async def channel_perms(ch: dict, user_id: str) -> int:
+    """Compute effective permissions for user on a specific channel.
+
+    Order:
+      base server perms → @everyone override → role overrides → member override.
+    Admins always get full perms.
+    """
+    server_id = ch["server_id"]
+    base = await member_perms(server_id, user_id)
+    if base == 0 or (base & PERM_ADMINISTRATOR):
+        return base
+    overrides = ch.get("permission_overrides") or []
+    if not overrides:
+        return base
+    member = await db.members.find_one({"server_id": server_id, "user_id": user_id}, {"_id": 0})
+    role_ids = set((member or {}).get("role_ids") or [])
+    # @everyone = default role — apply first if present
+    default_role = await db.roles.find_one({"server_id": server_id, "is_default": True}, {"_id": 0})
+    perms = base
+    if default_role:
+        for o in overrides:
+            if o.get("target_type") == "role" and o.get("target_id") == default_role["role_id"]:
+                perms = (perms & ~int(o.get("deny") or 0)) | int(o.get("allow") or 0)
+                break
+    # Other role overrides — ORed
+    allow_acc = 0
+    deny_acc = 0
+    for o in overrides:
+        if o.get("target_type") != "role":
+            continue
+        rid = o.get("target_id")
+        if default_role and rid == default_role["role_id"]:
+            continue
+        if rid in role_ids:
+            allow_acc |= int(o.get("allow") or 0)
+            deny_acc |= int(o.get("deny") or 0)
+    perms = (perms & ~deny_acc) | allow_acc
+    # Member-specific override takes precedence
+    for o in overrides:
+        if o.get("target_type") == "user" and o.get("target_id") == user_id:
+            perms = (perms & ~int(o.get("deny") or 0)) | int(o.get("allow") or 0)
+            break
+    return perms
+
+async def require_channel(ch: dict, user: dict, perm: int = PERM_VIEW) -> int:
+    perms = await channel_perms(ch, user["user_id"])
+    if perms == 0:
+        raise HTTPException(status_code=403, detail="Not a member")
+    if perm and not (perms & perm) and not (perms & PERM_ADMINISTRATOR):
+        raise HTTPException(status_code=403, detail="Missing channel permissions")
+    return perms
+
 async def assert_not_timed_out(server_id: str, user_id: str):
     """Empêche un membre en timeout de poster, réagir, ou rejoindre un vocal."""
     member = await db.members.find_one({"server_id": server_id, "user_id": user_id}, {"_id": 0})
@@ -1004,6 +1056,33 @@ async def delete_role(server_id: str, role_id: str, user: dict = Depends(get_cur
     await hub.broadcast_server(server_id, "role.delete", {"role_id": role_id})
     return {"ok": True}
 
+class ReorderRolesIn(BaseModel):
+    role_ids: List[str]
+
+@api.post("/servers/{server_id}/roles/reorder")
+async def reorder_roles(server_id: str, payload: ReorderRolesIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_ROLES)
+    # role at index 0 = top of visual list = highest position.
+    # Keep default role pinned at position 0 (bottom of visual list).
+    roles = await db.roles.find({"server_id": server_id}, {"_id": 0}).to_list(500)
+    role_ids = [r["role_id"] for r in roles]
+    provided = [rid for rid in payload.role_ids if rid in role_ids]
+    # Always-bottom default role
+    default_ids = [r["role_id"] for r in roles if r.get("is_default")]
+    ordered = [rid for rid in provided if rid not in default_ids]
+    # Append any missing non-default roles at the end of the visual list (lowest position)
+    missing = [rid for rid in role_ids if rid not in ordered and rid not in default_ids]
+    ordered = ordered + missing
+    # Assign positions: top of list = highest number. Default is 0 (bottom).
+    total = len(ordered)
+    for i, rid in enumerate(ordered):
+        pos = total - i  # first item gets highest pos
+        await db.roles.update_one({"role_id": rid, "server_id": server_id}, {"$set": {"position": pos}})
+    for rid in default_ids:
+        await db.roles.update_one({"role_id": rid, "server_id": server_id}, {"$set": {"position": 0}})
+    await hub.broadcast_server(server_id, "role.reorder", {"role_ids": ordered + default_ids})
+    return {"ok": True}
+
 # ========== Members ==========
 @api.get("/servers/{server_id}/members")
 async def list_members(server_id: str, user: dict = Depends(get_current_user)):
@@ -1308,7 +1387,7 @@ async def _resolve_channel(channel_id: str, user: dict) -> dict:
     ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
     if not ch:
         raise HTTPException(status_code=404, detail="Channel not found")
-    await require_membership(ch["server_id"], user, PERM_VIEW)
+    await require_channel(ch, user, PERM_VIEW)
     return ch
 
 @api.get("/channels/{channel_id}/messages")
@@ -1367,7 +1446,7 @@ async def get_messages(channel_id: str, before: Optional[str] = None, limit: int
 @api.post("/channels/{channel_id}/messages")
 async def send_message(channel_id: str, payload: SendMessageIn, user: dict = Depends(get_current_user)):
     ch = await _resolve_channel(channel_id, user)
-    perms = await require_membership(ch["server_id"], user, PERM_SEND)
+    perms = await require_channel(ch, user, PERM_SEND)
     await assert_not_timed_out(ch["server_id"], user["user_id"])
     if ch.get("locked") and not (perms & PERM_MANAGE_MESSAGES) and not (perms & PERM_ADMINISTRATOR):
         raise HTTPException(status_code=403, detail="Channel is locked")
@@ -2637,6 +2716,162 @@ async def update_mention_perms(channel_id: str, payload: MentionPermsIn, user: d
         await db.channels.update_one({"channel_id": channel_id}, {"$set": update})
         await hub.broadcast_server(ch["server_id"], "channel.update", {"channel_id": channel_id, **update})
     return {"ok": True, **update}
+
+
+# ========== 11b. CHANNEL PERMISSION OVERRIDES ==========
+class ChannelOverrideIn(BaseModel):
+    target_type: str = Field(..., pattern="^(role|user)$")
+    target_id: str = Field(..., min_length=3, max_length=64)
+    allow: int = Field(0, ge=0)
+    deny: int = Field(0, ge=0)
+
+@api.get("/channels/{channel_id}/overrides")
+async def list_channel_overrides(channel_id: str, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Salon introuvable")
+    await require_membership(ch["server_id"], user, PERM_VIEW)
+    return ch.get("permission_overrides") or []
+
+@api.put("/channels/{channel_id}/overrides")
+async def upsert_channel_override(channel_id: str, payload: ChannelOverrideIn, user: dict = Depends(get_current_user)):
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Salon introuvable")
+    await require_membership(ch["server_id"], user, PERM_MANAGE_CHANNELS)
+    # Validate target exists
+    if payload.target_type == "role":
+        role = await db.roles.find_one({"role_id": payload.target_id, "server_id": ch["server_id"]}, {"_id": 0})
+        if not role:
+            raise HTTPException(status_code=404, detail="Rôle introuvable")
+    else:  # user
+        member = await db.members.find_one({"user_id": payload.target_id, "server_id": ch["server_id"]}, {"_id": 0})
+        if not member:
+            raise HTTPException(status_code=404, detail="Membre introuvable")
+    existing = ch.get("permission_overrides") or []
+    new_list = [o for o in existing if not (o.get("target_type") == payload.target_type and o.get("target_id") == payload.target_id)]
+    if payload.allow or payload.deny:
+        new_list.append({
+            "target_type": payload.target_type,
+            "target_id": payload.target_id,
+            "allow": int(payload.allow),
+            "deny": int(payload.deny),
+        })
+    await db.channels.update_one({"channel_id": channel_id}, {"$set": {"permission_overrides": new_list}})
+    await hub.broadcast_server(ch["server_id"], "channel.update", {"channel_id": channel_id, "permission_overrides": new_list})
+    return {"ok": True, "permission_overrides": new_list}
+
+@api.delete("/channels/{channel_id}/overrides/{target_type}/{target_id}")
+async def delete_channel_override(channel_id: str, target_type: str, target_id: str, user: dict = Depends(get_current_user)):
+    if target_type not in ("role", "user"):
+        raise HTTPException(status_code=400, detail="target_type must be 'role' or 'user'")
+    ch = await db.channels.find_one({"channel_id": channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Salon introuvable")
+    await require_membership(ch["server_id"], user, PERM_MANAGE_CHANNELS)
+    existing = ch.get("permission_overrides") or []
+    new_list = [o for o in existing if not (o.get("target_type") == target_type and o.get("target_id") == target_id)]
+    await db.channels.update_one({"channel_id": channel_id}, {"$set": {"permission_overrides": new_list}})
+    await hub.broadcast_server(ch["server_id"], "channel.update", {"channel_id": channel_id, "permission_overrides": new_list})
+    return {"ok": True, "permission_overrides": new_list}
+
+
+# ========== 11c. USER RAIL LAYOUT (reorder servers + folders) ==========
+class RailFolderIn(BaseModel):
+    folder_id: Optional[str] = None
+    name: str = Field(min_length=1, max_length=32)
+    color: str = "#FF3B00"
+    collapsed: bool = False
+    server_ids: List[str] = []
+
+class RailItemIn(BaseModel):
+    type: str = Field(..., pattern="^(server|folder)$")
+    server_id: Optional[str] = None
+    folder: Optional[RailFolderIn] = None
+
+class RailLayoutIn(BaseModel):
+    items: List[RailItemIn]
+
+def _new_folder_id() -> str:
+    return gen_id("fld")
+
+async def _load_user_rail(user_id: str) -> dict:
+    doc = await db.user_rail.find_one({"user_id": user_id}, {"_id": 0})
+    if not doc:
+        doc = {"user_id": user_id, "items": [], "updated_at": now_iso()}
+    return doc
+
+@api.get("/me/rail")
+async def get_my_rail(user: dict = Depends(get_current_user)):
+    uid = user["user_id"]
+    doc = await _load_user_rail(uid)
+    items = doc.get("items") or []
+    # Gather all server_ids the user is a member of
+    members = await db.members.find({"user_id": uid}, {"_id": 0}).to_list(2000)
+    member_ids = {m["server_id"] for m in members}
+    # Clean stale ids from existing layout
+    cleaned = []
+    seen = set()
+    for it in items:
+        if it.get("type") == "server":
+            sid = it.get("server_id")
+            if sid in member_ids and sid not in seen:
+                cleaned.append({"type": "server", "server_id": sid})
+                seen.add(sid)
+        elif it.get("type") == "folder":
+            sids = [s for s in (it.get("server_ids") or []) if s in member_ids and s not in seen]
+            for s in sids:
+                seen.add(s)
+            cleaned.append({
+                "type": "folder",
+                "folder_id": it.get("folder_id") or _new_folder_id(),
+                "name": it.get("name") or "Dossier",
+                "color": it.get("color") or "#FF3B00",
+                "collapsed": bool(it.get("collapsed")),
+                "server_ids": sids,
+            })
+    # Append any server the user is member of but not present in layout
+    for sid in member_ids:
+        if sid not in seen:
+            cleaned.append({"type": "server", "server_id": sid})
+    return {"items": cleaned}
+
+@api.put("/me/rail")
+async def set_my_rail(payload: RailLayoutIn, user: dict = Depends(get_current_user)):
+    uid = user["user_id"]
+    members = await db.members.find({"user_id": uid}, {"_id": 0}).to_list(2000)
+    member_ids = {m["server_id"] for m in members}
+    items_out = []
+    seen = set()
+    for it in payload.items:
+        if it.type == "server":
+            sid = it.server_id
+            if sid and sid in member_ids and sid not in seen:
+                items_out.append({"type": "server", "server_id": sid})
+                seen.add(sid)
+        elif it.type == "folder" and it.folder:
+            f = it.folder
+            fids = [s for s in f.server_ids if s in member_ids and s not in seen]
+            for s in fids:
+                seen.add(s)
+            items_out.append({
+                "type": "folder",
+                "folder_id": f.folder_id or _new_folder_id(),
+                "name": f.name[:32],
+                "color": f.color,
+                "collapsed": bool(f.collapsed),
+                "server_ids": fids,
+            })
+    # Append remaining servers not present
+    for sid in member_ids:
+        if sid not in seen:
+            items_out.append({"type": "server", "server_id": sid})
+    await db.user_rail.update_one(
+        {"user_id": uid},
+        {"$set": {"user_id": uid, "items": items_out, "updated_at": now_iso()}},
+        upsert=True,
+    )
+    return {"items": items_out}
 
 
 # ========== 11. GIF TRENDING ==========

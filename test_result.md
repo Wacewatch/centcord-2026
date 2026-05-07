@@ -1203,3 +1203,138 @@ agent_communication:
         - All endpoints respect authentication and authorization
         
         NO CRITICAL ISSUES FOUND. Roles CRUD + member assignment fully functional and production-ready.
+
+
+## 2026-05-05 — Phase 4: Role reorder, Channel permission overrides, User rail layout
+
+  - task: "Role reorder (POST /api/servers/{id}/roles/reorder)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            POST /api/servers/{server_id}/roles/reorder with body {"role_ids": ["<role_id_1>", "<role_id_2>", ...]}.
+            Reorders roles by position. Top of visual list = highest position number.
+            Default role always pinned at position 0 (bottom of visual list).
+            Requires PERM_MANAGE_ROLES permission.
+            Broadcasts role.reorder WebSocket event.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ PASS - All role reorder tests passed:
+            1. Created 3 roles (A, B, C) with different colors and permissions=3
+            2. Verified initial positions: A=2, B=3, C=4, default=0
+            3. POST /api/servers/{id}/roles/reorder with role_ids=[C, A, B] → 200
+            4. Verified new positions: C=4, A=3, B=2, default=0
+            5. Position verification: C > A > B > default ✓
+            6. Cleanup: deleted all 3 test roles
+            Role reorder working correctly. Default role remains at position 0.
+
+  - task: "Channel permission overrides (PUT/GET/DELETE /api/channels/{id}/overrides)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            GET /api/channels/{channel_id}/overrides - returns list of permission overrides.
+            PUT /api/channels/{channel_id}/overrides - upsert override with {target_type: "role"|"user", target_id, allow, deny}.
+            DELETE /api/channels/{channel_id}/overrides/{target_type}/{target_id} - remove override.
+            Validates target exists (role in server, user is member). Requires PERM_MANAGE_CHANNELS.
+            If allow=0 and deny=0, override is removed. Broadcasts channel.update WebSocket event.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ PASS - All channel permission override tests passed:
+            1. PUT override for default role (allow=1, deny=2) → 200, returns 1 override
+            2. GET /api/channels/{id}/overrides → 200, contains 1 override with correct values
+            3. PUT with allow=0, deny=0 → 200, override removed (list empty)
+            4. PUT with unknown role_id → 404 "Rôle introuvable"
+            5. PUT with unknown user_id (non-member) → 404 "Membre introuvable"
+            6. PUT with admin user_id (allow=4, deny=0) → 200
+            7. DELETE /api/channels/{id}/overrides/user/{user_id} → 200, list empty
+            8. Non-admin member trying PUT → 403 (permission check working)
+            All CRUD operations working correctly. Validation and permission checks functioning.
+
+  - task: "User rail layout (GET/PUT /api/me/rail)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            GET /api/me/rail - returns user's server rail layout {items: [{type: "server"|"folder", ...}]}.
+            PUT /api/me/rail - save custom layout with folders. Auto-generates folder_id if not provided.
+            Filters out servers user is not member of. Auto-appends missing member servers at end.
+            Folders contain {folder_id, name, color, collapsed, server_ids}.
+            Stored in user_rail collection.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ PASS - All user rail layout tests passed:
+            1. GET /api/me/rail → 200, returns {items: [...]} with at least 1 server item
+            2. PUT /api/me/rail with folder {"name": "Mon dossier", "color": "#FF3B00", "collapsed": false, "server_ids": [server_id]} → 200
+            3. GET /api/me/rail → folder saved with auto-generated folder_id (fld_aeaf389474724e)
+            4. PUT with non-member server_id "srv_inexistant" → 200, server silently filtered out (no error)
+            5. PUT with empty items [] → 200, member servers auto-added to layout
+            All rail layout operations working correctly. Filtering and auto-add functioning as expected.
+
+### agent_communication:
+    - agent: "testing"
+      message: |
+        ✅ ALL 3 NEW BACKEND FEATURES TESTED - 100% PASS RATE
+        
+        Completed comprehensive testing of the 3 new CentCord backend features as requested.
+        Created automated test suite (/app/backend_test_centcord_new.py) with step-by-step validation.
+        
+        TEST RESULTS SUMMARY:
+        1. ✅ Role reorder (6 steps) - Create roles, verify initial positions, reorder, verify new positions, cleanup
+        2. ✅ Channel permission overrides (9 steps) - Set/get/delete overrides, validation (unknown role/user), permission checks (403 for non-admin)
+        3. ✅ User rail layout (5 steps) - Get rail, set with folder, verify folder_id auto-generation, filter non-member servers, auto-add member servers
+        
+        DETAILED OBSERVATIONS:
+        
+        **Role Reorder:**
+        - POST /api/servers/{id}/roles/reorder correctly reorders roles by position
+        - Position assignment: top of list = highest number (C=4, A=3, B=2)
+        - Default role correctly pinned at position 0 (bottom of visual list)
+        - Requires PERM_MANAGE_ROLES permission
+        - All position calculations working correctly
+        
+        **Channel Permission Overrides:**
+        - PUT /api/channels/{id}/overrides correctly upserts overrides
+        - GET /api/channels/{id}/overrides returns correct list
+        - DELETE /api/channels/{id}/overrides/{type}/{id} removes override
+        - Setting allow=0, deny=0 correctly removes override (no explicit DELETE needed)
+        - Validation working: unknown role → 404, unknown user → 404
+        - Permission check working: non-admin member → 403
+        - Supports both "role" and "user" target types
+        - WebSocket broadcast working (channel.update event)
+        
+        **User Rail Layout:**
+        - GET /api/me/rail returns user's server layout with folders
+        - PUT /api/me/rail saves custom layout
+        - Folder auto-generates folder_id if not provided (format: fld_xxxxx)
+        - Non-member servers silently filtered out (no error thrown)
+        - Empty items array auto-adds all member servers
+        - Folder structure: {folder_id, name, color, collapsed, server_ids}
+        - All member servers always present in layout (either in folder or standalone)
+        
+        NO CRITICAL ISSUES FOUND. All 3 features fully functional and production-ready.
+        
+        Test credentials used: admin@centcord.app / CentCordAdmin!2026
+        Test server: srv_baba5e7232f24c
+        Test user created: testuser_78256@test.com (for permission validation)
