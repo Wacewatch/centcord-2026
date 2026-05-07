@@ -979,7 +979,9 @@ async def create_role(server_id: str, payload: CreateRoleIn, user: dict = Depend
            "color": payload.color, "permissions": payload.permissions, "position": pos,
            "mentionable": payload.mentionable, "is_default": False, "created_at": now_iso()}
     await db.roles.insert_one(doc)
-    await hub.broadcast_server(server_id, "role.create", doc)
+    # Create clean dict for broadcast (remove MongoDB _id)
+    broadcast_doc = {k: v for k, v in doc.items() if k != "_id"}
+    await hub.broadcast_server(server_id, "role.create", broadcast_doc)
     doc.pop("_id", None)
     return doc
 
