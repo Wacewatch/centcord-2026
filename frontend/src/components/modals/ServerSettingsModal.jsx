@@ -310,6 +310,32 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
     return hasPerm(perms, bit) ? (perms - v) : (perms + v);
   };
 
+  // Drag & drop reorder
+  const [dragRoleId, setDragRoleId] = useState(null);
+  const reorderRoles = async (newOrderedIds) => {
+    try {
+      await api.post(`/servers/${server.server_id}/roles/reorder`, { role_ids: newOrderedIds });
+      reload && reload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Échec du réordonnancement");
+    }
+  };
+  const onRoleDragStart = (roleId) => setDragRoleId(roleId);
+  const onRoleDragEnd = () => setDragRoleId(null);
+  const onRoleDrop = (targetRoleId) => {
+    if (!dragRoleId || dragRoleId === targetRoleId) { setDragRoleId(null); return; }
+    const nonDefault = (server.roles || []).filter((r) => !r.is_default);
+    const ids = nonDefault.map((r) => r.role_id);
+    const from = ids.indexOf(dragRoleId);
+    const to = ids.indexOf(targetRoleId);
+    if (from < 0 || to < 0) { setDragRoleId(null); return; }
+    const next = ids.slice();
+    next.splice(from, 1);
+    next.splice(to, 0, dragRoleId);
+    setDragRoleId(null);
+    reorderRoles(next);
+  };
+
   const openCreateRole = () => {
     setEditingRoleId("new");
     setRoleForm({ name: "Nouveau rôle", color: "#FF3B00", permissions: 3, mentionable: true });
@@ -554,14 +580,25 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
                     <button onClick={openCreateRole} data-testid="role-create" className="bg-cc-accent text-white font-bold uppercase tracking-wide text-xs px-3 py-2 cc-brutal-shadow cc-brutal-press">+ Créer un rôle</button>
                   </div>
                   <p className="text-[10px] uppercase tracking-widest text-cc-muted mb-3">
-                    Cliquez sur un rôle pour modifier son nom, sa couleur, ses permissions et les membres qui le portent.
+                    Cliquez sur un rôle pour modifier son nom, sa couleur, ses permissions et les membres qui le portent. Glissez-déposez pour changer l'ordre (le rôle en haut a la priorité).
                   </p>
                   <ul className="space-y-2">
                     {(server.roles || []).map((r) => {
                       const count = members.filter((m) => (m.role_ids || []).includes(r.role_id)).length;
                       const isAdminRole = hasPerm(r.permissions, 31);
+                      const dragging = dragRoleId === r.role_id;
                       return (
-                        <li key={r.role_id} data-testid={`role-row-${r.role_id}`} className="border border-cc-border bg-cc-surface2 px-3 py-2 flex items-center gap-3">
+                        <li
+                          key={r.role_id}
+                          data-testid={`role-row-${r.role_id}`}
+                          draggable={!r.is_default}
+                          onDragStart={() => onRoleDragStart(r.role_id)}
+                          onDragEnd={onRoleDragEnd}
+                          onDragOver={(e) => { if (dragRoleId && !r.is_default) e.preventDefault(); }}
+                          onDrop={(e) => { e.preventDefault(); if (!r.is_default) onRoleDrop(r.role_id); }}
+                          className={`border border-cc-border bg-cc-surface2 px-3 py-2 flex items-center gap-3 transition-opacity ${dragging ? "opacity-40" : ""} ${!r.is_default ? "cursor-grab active:cursor-grabbing" : ""}`}
+                        >
+                          {!r.is_default && <span className="text-cc-muted text-xs select-none leading-none" aria-hidden="true">⋮⋮</span>}
                           <span className="w-3 h-3 rounded-sm shrink-0 border border-black/20" style={{ background: r.color }} />
                           <span className="font-display font-bold truncate" style={{ color: r.color }}>{r.name}</span>
                           {r.is_default && <span className="text-[9px] uppercase tracking-widest text-cc-muted shrink-0">par défaut</span>}
