@@ -36,6 +36,24 @@ export default function SettingsPage() {
     activity_emoji: user?.activity_emoji || "",
   });
   const [savingActivity, setSavingActivity] = useState(false);
+  // Password change state
+  const [pwd, setPwd] = useState({ current: "", next: "", confirm: "" });
+  const [changingPwd, setChangingPwd] = useState(false);
+
+  const changePassword = async () => {
+    if (pwd.next.length < 8) { toast.error("Le nouveau mot de passe doit avoir au moins 8 caractères."); return; }
+    if (pwd.next !== pwd.confirm) { toast.error("La confirmation ne correspond pas."); return; }
+    if (pwd.next === pwd.current) { toast.error("Le nouveau mot de passe doit être différent de l'actuel."); return; }
+    setChangingPwd(true);
+    try {
+      await api.post("/users/me/change-password", { current_password: pwd.current, new_password: pwd.next });
+      toast.success("Mot de passe modifié");
+      setPwd({ current: "", next: "", confirm: "" });
+    } catch (e) {
+      const detail = e?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Échec du changement");
+    } finally { setChangingPwd(false); }
+  };
 
   const saveActivity = async () => {
     setSavingActivity(true);
@@ -181,6 +199,50 @@ export default function SettingsPage() {
             <>
               <h1 className="font-display text-4xl font-extrabold tracking-tighter uppercase mb-8">Confidentialité & sécurité</h1>
               <div className="space-y-3">
+                {/* Change password */}
+                <div className="border border-cc-border bg-cc-surface1 p-5 text-sm">
+                  <div className="text-cc-text font-bold mb-1 flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-cc-accent" /> Changer mon mot de passe
+                  </div>
+                  <p className="text-cc-subtext text-xs mb-4">Choisissez un mot de passe d'au moins 8 caractères. Toutes vos autres sessions seront fermées.</p>
+                  <div className="grid gap-2.5 max-w-md">
+                    <input
+                      type="password"
+                      placeholder="Mot de passe actuel"
+                      value={pwd.current}
+                      onChange={(e) => setPwd({ ...pwd, current: e.target.value })}
+                      data-testid="pwd-current"
+                      autoComplete="current-password"
+                      className="bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 text-sm"
+                    />
+                    <input
+                      type="password"
+                      placeholder="Nouveau mot de passe (8 car. min.)"
+                      value={pwd.next}
+                      onChange={(e) => setPwd({ ...pwd, next: e.target.value })}
+                      data-testid="pwd-new"
+                      autoComplete="new-password"
+                      className="bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 text-sm"
+                    />
+                    <input
+                      type="password"
+                      placeholder="Confirmer le nouveau mot de passe"
+                      value={pwd.confirm}
+                      onChange={(e) => setPwd({ ...pwd, confirm: e.target.value })}
+                      data-testid="pwd-confirm"
+                      autoComplete="new-password"
+                      className="bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 text-sm"
+                    />
+                    <button
+                      onClick={changePassword}
+                      disabled={changingPwd || !pwd.current || !pwd.next || !pwd.confirm}
+                      data-testid="pwd-submit"
+                      className="bg-cc-accent text-white font-bold uppercase tracking-wide px-4 py-2 cc-brutal-shadow cc-brutal-press disabled:opacity-50 mt-1"
+                    >
+                      {changingPwd ? "Modification..." : "Modifier le mot de passe"}
+                    </button>
+                  </div>
+                </div>
                 <div className="border border-cc-border bg-cc-surface1 p-4 text-sm">
                   <div className="text-cc-text font-bold mb-1">Clés de chiffrement bout-en-bout</div>
                   <p className="text-cc-subtext text-xs">Une paire de clés ECDH P-256 est stockée localement sur cet appareil. Votre clé privée ne le quitte jamais.</p>

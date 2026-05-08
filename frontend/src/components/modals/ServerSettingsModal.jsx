@@ -535,7 +535,6 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
                     {label: "Messages 7 j", value: stats.messages_7d, testid: "stat-messages-7d"},
                     {label: "Salons", value: stats.channel_count, testid: "stat-channels"},
                     {label: "Rôles", value: stats.role_count, testid: "stat-roles"},
-                    {label: "Boosts", value: stats.boost_count, testid: "stat-boosts"},
                   ].map((s) => (
                     <div key={s.label} data-testid={s.testid} className="border border-cc-border bg-cc-surface2 px-4 py-3">
                       <div className="text-[10px] uppercase tracking-widest text-cc-muted">{s.label}</div>

@@ -15,8 +15,8 @@ import PinModal from "./PinModal";
 import SearchModal from "./SearchModal";
 import ThreadPanel from "./ThreadPanel";
 import VoiceRoom from "./VoiceRoom";
-import BoostBadge from "./BoostBadge";
 import UserProfilePopover from "./UserProfilePopover";
+import SortableChannelList from "./SortableChannelList";
 import { Hash, Volume2, Megaphone, BookOpen, ChevronDown, ChevronRight, Plus, Settings, Users, Pin, Search, Menu, X as XIcon } from "lucide-react";
 import { cn } from "../lib/utils";
 import { toast } from "sonner";
@@ -48,6 +48,8 @@ export default function ServerView({ servers, reload }) {
   const [profileUserId, setProfileUserId] = useState(null);
   const [voicePresence, setVoicePresence] = useState({}); // { channel_id: [participants] }
   const [channelMenu, setChannelMenu] = useState(null); // { channel, x, y } | null
+  const [editingTopic, setEditingTopic] = useState(false);
+  const [topicDraft, setTopicDraft] = useState("");
   // Ref to always have the latest active channel_id inside WS callbacks (avoids stale closures)
   const activeChannelIdRef = React.useRef(null);
   React.useEffect(() => { activeChannelIdRef.current = channel?.channel_id || null; }, [channel?.channel_id]);
@@ -140,6 +142,8 @@ export default function ServerView({ servers, reload }) {
     const offD = ws.subscribe("message.delete", (d) => setMessages((prev) => prev.filter((m) => m.message_id !== d.message_id)));
     const offR = ws.subscribe("message.reaction", (d) => setMessages((prev) => prev.map((m) => m.message_id === d.message_id ? { ...m, reactions: d.reactions } : m)));
     const offChCreate = ws.subscribe("channel.create", () => loadServer());
+    const offChReorder = ws.subscribe("channel.reorder", () => loadServer());
+    const offCatReorder = ws.subscribe("category.reorder", () => loadServer());
     const offChDel = ws.subscribe("channel.delete", (d) => {
       // If the active channel was deleted, navigate away
       if (d?.channel_id && d.channel_id === activeChannelIdRef.current) {
@@ -161,8 +165,6 @@ export default function ServerView({ servers, reload }) {
     const offSrvUpdate = ws.subscribe("server.update", () => loadServer());
     const offEmCreate = ws.subscribe("emoji.create", () => loadEmojis());
     const offEmDel = ws.subscribe("emoji.delete", () => loadEmojis());
-    const offBoost = ws.subscribe("server.boost", () => loadServer());
-    const offBoostReward = ws.subscribe("server.boost.reward", () => loadServer());
     const offVoice = ws.subscribe("voice.presence", (p) => {
       if (!p?.channel_id) return;
       setVoicePresence((v) => ({ ...v, [p.channel_id]: p.participants || [] }));
@@ -174,12 +176,12 @@ export default function ServerView({ servers, reload }) {
     return () => {
       offC(); offU(); offD(); offR();
       offChCreate(); offChDel(); offChUpdate();
+      offChReorder(); offCatReorder();
       offCatCreate(); offCatDel(); offCatUpdate();
       offRoleCreate(); offRoleUpdate(); offRoleDel();
       offMember(); offMemberUpdate(); offMemberKick(); offMemberBan();
       offSrvUpdate();
       offEmCreate(); offEmDel();
-      offBoost(); offBoostReward();
       offVoice();
       offThread();
     };
@@ -230,8 +232,42 @@ export default function ServerView({ servers, reload }) {
     channelsByCat[k] = channelsByCat[k] || [];
     channelsByCat[k].push(c);
   }
-  const cats = [...(server.categories || [])];
+  // Sort channels by position within each category
+  for (const k of Object.keys(channelsByCat)) {
+    channelsByCat[k].sort((a, b) => (a.position || 0) - (b.position || 0));
+  }
+  const cats = [...(server.categories || [])].sort((a, b) => (a.position || 0) - (b.position || 0));
   const Icon = channelIcon(channel?.type);
+
+  // Reorder channels within a category
+  const reorderChannels = async (categoryIdOrNull, orderedIds) => {
+    const items = orderedIds.map((channel_id, idx) => ({
+      channel_id,
+      position: idx,
+      category_id: categoryIdOrNull || null,
+    }));
+    try {
+      await api.post(`/servers/${serverId}/channels/reorder`, { items });
+      loadServer();
+    } catch (_) { toast.error("Échec du réordonnancement"); }
+  };
+
+  // Move a single channel to another category
+  const moveChannelToCategory = async (ch, targetCategoryId) => {
+    setChannelMenu(null);
+    const target = targetCategoryId === "_uncat" ? null : targetCategoryId;
+    if ((ch.category_id || null) === target) return;
+    // Place at the end of the target category
+    const destList = channelsByCat[target || "_uncat"] || [];
+    const newPos = destList.length;
+    try {
+      await api.post(`/servers/${serverId}/channels/reorder`, {
+        items: [{ channel_id: ch.channel_id, position: newPos, category_id: target }],
+      });
+      toast.success("Salon déplacé");
+      loadServer();
+    } catch (_) { toast.error("Échec du déplacement"); }
+  };
 
   const sendMsg = async (content, attachments, reply_to) => {
     if (!channel) return;
@@ -301,6 +337,70 @@ export default function ServerView({ servers, reload }) {
     } catch (_) { toast.error("Échec"); }
   };
 
+  const startEditTopic = () => {
+    if (!channel) return;
+    setTopicDraft(channel.topic || "");
+    setEditingTopic(true);
+  };
+
+  const saveTopic = async () => {
+    if (!channel) { setEditingTopic(false); return; }
+    const next = (topicDraft || "").trim().slice(0, 400);
+    if (next === (channel.topic || "")) { setEditingTopic(false); return; }
+    try {
+      await api.patch(`/servers/${serverId}/channels/${channel.channel_id}`, { topic: next });
+      toast.success("Sujet mis à jour");
+      loadServer();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Échec");
+    } finally { setEditingTopic(false); }
+  };
+
+  // Render a single channel row (used by SortableChannelList)
+  const renderChannelRow = (c, dragMeta) => {
+    const Ic = channelIcon(c.type);
+    const active = c.channel_id === channel?.channel_id;
+    const unreadCount = unread[c.channel_id] || 0;
+    const vps = voicePresence[c.channel_id] || [];
+    return (
+      <div className="relative">
+        <button
+          onClick={() => goToChannel(c.channel_id)}
+          onContextMenu={(e) => openChannelMenu(e, c)}
+          data-testid={`channel-${c.channel_id}`}
+          className={cn(
+            "w-full flex items-center gap-2 pl-1 pr-3 py-1.5 text-sm transition-colors rounded",
+            active ? "bg-cc-surface2 text-cc-text" : (unreadCount > 0 ? "text-cc-text font-bold hover:bg-cc-surface2" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text")
+          )}
+        >
+          {dragMeta?.handle || <span className="w-4 shrink-0" />}
+          <Ic className="w-4 h-4 text-cc-muted shrink-0" />
+          <span className="truncate flex-1 text-left">{c.name}</span>
+          {c.type === "voice" && vps.length > 0 && (
+            <span className="shrink-0 text-[10px] font-bold bg-cc-success/30 text-cc-success px-1.5 py-0.5 rounded-full" data-testid={`voice-count-${c.channel_id}`}>
+              {vps.length}
+            </span>
+          )}
+          {unreadCount > 0 && !active && (
+            <span className="shrink-0 text-[10px] font-bold bg-cc-accent text-white px-1.5 py-0.5 rounded-full min-w-[18px] text-center" data-testid={`unread-${c.channel_id}`}>
+              {unreadCount > 99 ? "99+" : unreadCount}
+            </span>
+          )}
+        </button>
+        {c.type === "voice" && vps.length > 0 && (
+          <ul className="ml-7 mt-0.5 space-y-0.5" data-testid={`voice-participants-${c.channel_id}`}>
+            {vps.map((p) => (
+              <li key={p.user_id} className="flex items-center gap-1.5 px-2 py-0.5 text-xs text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text cursor-pointer" onClick={() => setProfileUserId(p.user_id)}>
+                <span className="w-1.5 h-1.5 rounded-full bg-cc-success animate-pulse" />
+                <span className="truncate" style={{ color: memberColorMap[p.user_id] || undefined }}>{p.display_name || "Membre"}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  };
+
   return (
     <>
       <aside
@@ -329,83 +429,25 @@ export default function ServerView({ servers, reload }) {
                   <Plus onClick={(e) => { e.stopPropagation(); createChannel(cat.category_id); }} className="w-3 h-3 hover:text-cc-accent" />
                 </button>
                 {!collapsed && (
-                  <ul className="mt-1 space-y-0.5">
-                    {list.map((c) => {
-                      const Ic = channelIcon(c.type);
-                      const active = c.channel_id === channel?.channel_id;
-                      const unreadCount = unread[c.channel_id] || 0;
-                      const vps = voicePresence[c.channel_id] || [];
-                      return (
-                        <li key={c.channel_id}>
-                          <button
-                            onClick={() => goToChannel(c.channel_id)}
-                            onContextMenu={(e) => openChannelMenu(e, c)}
-                            data-testid={`channel-${c.channel_id}`}
-                            className={cn(
-                              "w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors",
-                              active ? "bg-cc-surface2 text-cc-text" : (unreadCount > 0 ? "text-cc-text font-bold hover:bg-cc-surface2" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text")
-                            )}
-                          >
-                            <Ic className="w-4 h-4 text-cc-muted shrink-0" />
-                            <span className="truncate flex-1 text-left">{c.name}</span>
-                            {c.type === "voice" && vps.length > 0 && (
-                              <span className="shrink-0 text-[10px] font-bold bg-cc-success/30 text-cc-success px-1.5 py-0.5 rounded-full" data-testid={`voice-count-${c.channel_id}`}>
-                                {vps.length}
-                              </span>
-                            )}
-                            {unreadCount > 0 && !active && (
-                              <span className="shrink-0 text-[10px] font-bold bg-cc-accent text-white px-1.5 py-0.5 rounded-full min-w-[18px] text-center" data-testid={`unread-${c.channel_id}`}>
-                                {unreadCount > 99 ? "99+" : unreadCount}
-                              </span>
-                            )}
-                          </button>
-                          {c.type === "voice" && vps.length > 0 && (
-                            <ul className="ml-7 mt-0.5 space-y-0.5" data-testid={`voice-participants-${c.channel_id}`}>
-                              {vps.map((p) => (
-                                <li key={p.user_id} className="flex items-center gap-1.5 px-2 py-0.5 text-xs text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text cursor-pointer" onClick={() => setProfileUserId(p.user_id)}>
-                                  <span className="w-1.5 h-1.5 rounded-full bg-cc-success animate-pulse" />
-                                  <span className="truncate" style={{ color: memberColorMap[p.user_id] || undefined }}>{p.display_name || "Membre"}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
+                  <div className="mt-1 space-y-0.5">
+                    <SortableChannelList
+                      items={list}
+                      onReorder={(orderedIds) => reorderChannels(cat.category_id, orderedIds)}
+                      renderItem={renderChannelRow}
+                    />
+                  </div>
                 )}
               </div>
             );
           })}
           {(channelsByCat["_uncat"] || []).length > 0 && (
-            <ul className="space-y-0.5">
-              {channelsByCat["_uncat"].map((c) => {
-                const Ic = channelIcon(c.type);
-                const active = c.channel_id === channel?.channel_id;
-                const vps = voicePresence[c.channel_id] || [];
-                return (
-                  <li key={c.channel_id}>
-                    <button onClick={() => goToChannel(c.channel_id)} onContextMenu={(e) => openChannelMenu(e, c)} className={cn("w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors", active ? "bg-cc-surface2 text-cc-text" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text")}>
-                      <Ic className="w-4 h-4 text-cc-muted shrink-0" />
-                      <span className="truncate flex-1 text-left">{c.name}</span>
-                      {c.type === "voice" && vps.length > 0 && (
-                        <span className="shrink-0 text-[10px] font-bold bg-cc-success/30 text-cc-success px-1.5 py-0.5 rounded-full">{vps.length}</span>
-                      )}
-                    </button>
-                    {c.type === "voice" && vps.length > 0 && (
-                      <ul className="ml-7 mt-0.5 space-y-0.5">
-                        {vps.map((p) => (
-                          <li key={p.user_id} className="flex items-center gap-1.5 px-2 py-0.5 text-xs text-cc-subtext hover:text-cc-text cursor-pointer" onClick={() => setProfileUserId(p.user_id)}>
-                            <span className="w-1.5 h-1.5 rounded-full bg-cc-success animate-pulse" />
-                            <span className="truncate" style={{ color: memberColorMap[p.user_id] || undefined }}>{p.display_name || "Membre"}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="space-y-0.5">
+              <SortableChannelList
+                items={channelsByCat["_uncat"]}
+                onReorder={(orderedIds) => reorderChannels(null, orderedIds)}
+                renderItem={renderChannelRow}
+              />
+            </div>
           )}
         </div>
         <div className="mt-auto"><UserBar /></div>
@@ -425,14 +467,37 @@ export default function ServerView({ servers, reload }) {
           )}
           <Icon className="w-4 h-4 text-cc-muted shrink-0" />
           <span className="font-display font-bold uppercase tracking-tight text-sm truncate" data-testid="channel-name">{channel?.name || "—"}</span>
-          {channel?.topic && (
+          {channel && (
             <>
               <div className="w-px h-5 bg-cc-border hidden sm:block" />
-              <span className="text-cc-subtext text-xs truncate hidden sm:inline">{channel.topic}</span>
+              {editingTopic ? (
+                <input
+                  autoFocus
+                  value={topicDraft}
+                  onChange={(e) => setTopicDraft(e.target.value)}
+                  onBlur={saveTopic}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") saveTopic();
+                    if (e.key === "Escape") setEditingTopic(false);
+                  }}
+                  maxLength={400}
+                  data-testid="topic-input"
+                  className="bg-cc-base border border-cc-accent text-xs px-2 py-1 outline-none flex-1 min-w-0 max-w-md hidden sm:inline-block"
+                  placeholder="Sujet du salon"
+                />
+              ) : (
+                <button
+                  onClick={startEditTopic}
+                  data-testid="topic-display"
+                  className="text-cc-subtext text-xs truncate hidden sm:inline-block hover:text-cc-text transition-colors text-left"
+                  title="Cliquez pour modifier le sujet"
+                >
+                  {channel.topic || <span className="italic text-cc-muted">Cliquez pour ajouter un sujet…</span>}
+                </button>
+              )}
             </>
           )}
           <div className="ml-auto flex items-center gap-0.5 sm:gap-1 shrink-0">
-            <BoostBadge server={server} onChange={loadServer} />
             <button onClick={() => setOpenPins(true)} data-testid="header-pins" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text hidden sm:inline-flex" title="Épinglés"><Pin className="w-4 h-4" /></button>
             <button data-testid="header-toggle-members" onClick={() => setShowMembers(!showMembers)} className={cn("p-2 hover:bg-cc-surface2 transition-colors", showMembers ? "text-cc-text" : "text-cc-subtext")} title="Membres"><Users className="w-4 h-4" /></button>
             <button onClick={() => setOpenSearch(true)} data-testid="header-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Rechercher"><Search className="w-4 h-4" /></button>
@@ -444,6 +509,20 @@ export default function ServerView({ servers, reload }) {
           <VoiceRoom channel={channel} server={server} />
         ) : (
           <>
+            {channel?.type === "announcement" && (
+              <div className="mx-3 mt-3 px-4 py-2 cc-card flex items-center gap-3 text-sm">
+                <Megaphone className="w-4 h-4 text-cc-accent shrink-0" />
+                <span className="text-cc-text font-bold">Salon d'annonces</span>
+                <span className="text-cc-muted text-xs">— seuls les administrateurs peuvent y publier.</span>
+              </div>
+            )}
+            {channel?.type === "forum" && (
+              <div className="mx-3 mt-3 px-4 py-2 cc-card flex items-center gap-3 text-sm">
+                <BookOpen className="w-4 h-4 text-cc-accent shrink-0" />
+                <span className="text-cc-text font-bold">Forum</span>
+                <span className="text-cc-muted text-xs">— créez des fils de discussion (clic-droit sur un message → Créer un fil).</span>
+              </div>
+            )}
             <MessageList
               messages={messages}
               currentUser={user}
@@ -455,15 +534,25 @@ export default function ServerView({ servers, reload }) {
               memberColorMap={memberColorMap}
               customEmojiMap={customEmojiMap}
             />
-            <MessageComposer
-              placeholder={`Message #${channel?.name || ""}`}
-              onSend={sendMsg}
-              testIdPrefix="ch"
-              serverId={serverId}
-              channelId={channel?.channel_id}
-              replyTo={replyTo}
-              onCancelReply={() => setReplyTo(null)}
-            />
+            {channel?.type === "announcement" && server.owner_id !== user?.user_id && user?.role !== "admin" ? (
+              <div className="px-4 py-3 mx-3 mb-3 cc-card text-center text-xs text-cc-muted italic">
+                Vous n'avez pas la permission de publier dans ce salon d'annonces.
+              </div>
+            ) : (
+              <MessageComposer
+                placeholder={
+                  channel?.type === "announcement" ? `Annonce dans #${channel?.name || ""}` :
+                  channel?.type === "forum" ? `Nouveau post dans #${channel?.name || ""}` :
+                  `Message #${channel?.name || ""}`
+                }
+                onSend={sendMsg}
+                testIdPrefix="ch"
+                serverId={serverId}
+                channelId={channel?.channel_id}
+                replyTo={replyTo}
+                onCancelReply={() => setReplyTo(null)}
+              />
+            )}
           </>
         )}
       </main>
@@ -481,10 +570,10 @@ export default function ServerView({ servers, reload }) {
         <>
           <div className="fixed inset-0 z-[60]" onClick={() => setChannelMenu(null)} onContextMenu={(e) => { e.preventDefault(); setChannelMenu(null); }} />
           <div
-            className="fixed z-[61] bg-cc-surface1 border border-cc-border shadow-lg min-w-[180px] py-1"
+            className="fixed z-[61] bg-cc-surface1 border border-cc-border shadow-lg min-w-[200px] py-1"
             style={{
-              left: Math.min(channelMenu.x, (typeof window !== "undefined" ? window.innerWidth : 1000) - 200),
-              top: Math.min(channelMenu.y, (typeof window !== "undefined" ? window.innerHeight : 800) - 120),
+              left: Math.min(channelMenu.x, (typeof window !== "undefined" ? window.innerWidth : 1000) - 220),
+              top: Math.min(channelMenu.y, (typeof window !== "undefined" ? window.innerHeight : 800) - 320),
             }}
             data-testid="channel-context-menu"
           >
@@ -494,6 +583,28 @@ export default function ServerView({ servers, reload }) {
               className="w-full text-left px-3 py-2 text-sm text-cc-text hover:bg-cc-surface2 transition-colors"
               data-testid="ctx-rename-channel"
             >Renommer</button>
+            {/* Move to category submenu (flat list of categories) */}
+            {(cats.length > 0 || (channelMenu.channel.category_id && true)) && (
+              <>
+                <div className="border-t border-cc-border my-1" />
+                <div className="px-3 py-1 text-[9px] uppercase tracking-widest font-bold text-cc-muted">Déplacer vers</div>
+                {cats.filter(c => c.category_id !== channelMenu.channel.category_id).map((c) => (
+                  <button
+                    key={c.category_id}
+                    onClick={() => moveChannelToCategory(channelMenu.channel, c.category_id)}
+                    className="w-full text-left px-3 py-1.5 text-xs text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text transition-colors truncate"
+                    data-testid={`ctx-move-to-${c.category_id}`}
+                  >→ {c.name}</button>
+                ))}
+                {channelMenu.channel.category_id && (
+                  <button
+                    onClick={() => moveChannelToCategory(channelMenu.channel, "_uncat")}
+                    className="w-full text-left px-3 py-1.5 text-xs text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text transition-colors italic"
+                  >→ Sans catégorie</button>
+                )}
+                <div className="border-t border-cc-border my-1" />
+              </>
+            )}
             <button
               onClick={() => deleteChannel(channelMenu.channel)}
               className="w-full text-left px-3 py-2 text-sm text-cc-danger hover:bg-cc-surface2 transition-colors"

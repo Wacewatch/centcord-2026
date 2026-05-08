@@ -733,6 +733,28 @@ async def update_me(payload: UpdateProfileIn, user: dict = Depends(get_current_u
         await hub.send_users(ids, "presence.update", {"user_id": user["user_id"], "status": fresh.get("status"), "custom_status": fresh.get("custom_status")})
     return public_user(fresh)
 
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=200)
+
+@api.post("/users/me/change-password")
+async def change_password(payload: ChangePasswordIn, user: dict = Depends(get_current_user)):
+    """Change the password of the currently authenticated user."""
+    full = await db.users.find_one({"user_id": user["user_id"]})
+    if not full or not full.get("password_hash"):
+        raise HTTPException(status_code=400, detail="Aucun mot de passe configuré sur ce compte.")
+    if not verify_password(payload.current_password, full["password_hash"]):
+        raise HTTPException(status_code=400, detail="Le mot de passe actuel est incorrect.")
+    if payload.new_password == payload.current_password:
+        raise HTTPException(status_code=400, detail="Le nouveau mot de passe doit être différent.")
+    new_hash = hash_password(payload.new_password)
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"password_hash": new_hash, "updated_at": now_iso()}}
+    )
+    return {"ok": True}
+
+
 @api.get("/users/{user_id}")
 async def get_user(user_id: str, user: dict = Depends(get_current_user)):
     u = await db.users.find_one({"user_id": user_id}, {"_id": 0})
@@ -1023,6 +1045,51 @@ async def delete_channel(server_id: str, channel_id: str, user: dict = Depends(g
     await db.messages.delete_many({"channel_id": channel_id})
     await hub.broadcast_server(server_id, "channel.delete", {"channel_id": channel_id})
     return {"ok": True}
+
+class ReorderChannelsItem(BaseModel):
+    channel_id: str
+    position: int
+    category_id: Optional[str] = None
+
+class ReorderChannelsIn(BaseModel):
+    items: List[ReorderChannelsItem]
+
+@api.post("/servers/{server_id}/channels/reorder")
+async def reorder_channels(server_id: str, payload: ReorderChannelsIn, user: dict = Depends(get_current_user)):
+    """Bulk-update channel position and optionally move them between categories.
+    Used for drag-and-drop reordering."""
+    await require_membership(server_id, user, PERM_MANAGE_CHANNELS)
+    for item in payload.items:
+        update = {"position": item.position}
+        # Allow null to mean "uncategorized"
+        if item.category_id is not None or item.category_id == "":
+            update["category_id"] = item.category_id or None
+        await db.channels.update_one(
+            {"channel_id": item.channel_id, "server_id": server_id},
+            {"$set": update}
+        )
+    # Broadcast a single update event so clients reload the server view
+    await hub.broadcast_server(server_id, "channel.reorder", {"server_id": server_id})
+    return {"ok": True}
+
+class ReorderCategoriesItem(BaseModel):
+    category_id: str
+    position: int
+
+class ReorderCategoriesIn(BaseModel):
+    items: List[ReorderCategoriesItem]
+
+@api.post("/servers/{server_id}/categories/reorder")
+async def reorder_categories(server_id: str, payload: ReorderCategoriesIn, user: dict = Depends(get_current_user)):
+    await require_membership(server_id, user, PERM_MANAGE_CHANNELS)
+    for item in payload.items:
+        await db.categories.update_one(
+            {"category_id": item.category_id, "server_id": server_id},
+            {"$set": {"position": item.position}}
+        )
+    await hub.broadcast_server(server_id, "category.reorder", {"server_id": server_id})
+    return {"ok": True}
+
 
 # ========== Roles ==========
 @api.post("/servers/{server_id}/roles")
@@ -1449,6 +1516,9 @@ async def get_messages(channel_id: str, before: Optional[str] = None, limit: int
 async def send_message(channel_id: str, payload: SendMessageIn, user: dict = Depends(get_current_user)):
     ch = await _resolve_channel(channel_id, user)
     perms = await require_channel(ch, user, PERM_SEND)
+    # Announcement channels: only members with MANAGE_MESSAGES (or admin) can post
+    if ch.get("type") == "announcement" and not (perms & PERM_MANAGE_MESSAGES) and not (perms & PERM_ADMINISTRATOR):
+        raise HTTPException(status_code=403, detail="Seuls les administrateurs peuvent publier dans un salon d'annonces.")
     await assert_not_timed_out(ch["server_id"], user["user_id"])
     if ch.get("locked") and not (perms & PERM_MANAGE_MESSAGES) and not (perms & PERM_ADMINISTRATOR):
         raise HTTPException(status_code=403, detail="Channel is locked")
