@@ -12,7 +12,7 @@ import json
 import sys
 
 # Backend URL
-BASE_URL = "https://pending-work-13.preview.emergentagent.com/api"
+BASE_URL = "https://admin-panel-fix-118.preview.emergentagent.com/api"
 
 # Test credentials
 ADMIN_EMAIL = "admin@centcord.app"
