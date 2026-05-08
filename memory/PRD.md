@@ -64,6 +64,19 @@ User uploaded a 1700+ line PHP file (`centcord.php`) — a Discord-style chat & 
 ### Test credentials
 - `admin@centcord.app` / `CentCordAdmin!2026` (auto-seeded)
 
+## Implemented (date: 2026-02 fork)
+- ✅ Channel/category bug fixes (delete channel, create category, message bleeding, refresh delays)
+- ✅ LiveKit voice/video integration (1 voice room per server)
+- ✅ Inline topic editing in server header
+- ✅ Channel drag-and-drop reordering via @dnd-kit (`SortableChannelList.jsx`)
+- ✅ Password change API + UI in Privacy & Security settings (`PATCH /api/users/me/password`)
+- ✅ Forum/Announcement channel creation type fix
+- ✅ Boost system fully removed (backend + frontend)
+- ✅ Glassmorphism UI overhaul (translucent panels, soft gradients, orange accent #FF3B00)
+- ✅ **[CRITICAL]** Fixed UI freeze: `/api/servers/unread` was matched as `/api/servers/{server_id}` due to FastAPI route ordering, causing 403 'Not a member' loop every 30s. Moved /servers/unread BEFORE /servers/{server_id} in server.py (~line 906).
+- ✅ **NO file transfers in chat or DMs**: rewrote `MessageComposer.jsx` to remove paperclip button, file input, drop overlay, paste-file handler, attachments state. (Server icon/emoji/sticker uploads from server settings still work — these are admin operations not user-to-user transfers.)
+- ✅ **Server rail drag & drop with folders** (Discord-style): rewrote `ServerRail.jsx` with @dnd-kit. Drop a server onto another to create a folder; drop onto an existing folder to add. Folder shows 2x2 mini icon grid + count badge. Click to expand. Right-click to rename / change color / ungroup. Layout persisted via existing `GET/PUT /api/me/rail` endpoints (auto-syncs missing servers, drops stale ids).
+
 ## Backlog (P0/P1/P2)
 ### P1 — IMPLEMENTED in 2026-05 update
 - ✅ Threads (per-message thread chains) — `ThreadPanel.jsx` + create-from-message
@@ -71,12 +84,11 @@ User uploaded a 1700+ line PHP file (`centcord.php`) — a Discord-style chat & 
 - ✅ Custom emojis & stickers picker UI — `EmojiGifPicker.jsx` (Unicode + custom + curated GIFs)
 - ✅ Notifications panel — globally wired in `UserBar` and channel header
 - ✅ Search-within-channel UI — `SearchModal.jsx` accessible via header icon
-- ✅ Voice channel actual WebRTC integration — `VoiceRoom.jsx` (P2P with STUN, mute/deafen)
-- ✅ Server boost UI — `BoostBadge.jsx` in channel header (tier 1/2/3)
+- ✅ Voice channel actual WebRTC integration — now LiveKit-based `VoiceRoom.jsx`
 - ✅ Bookmarks page — `BookmarksPage.jsx` accessible from DM sidebar
 - ✅ Reply-to (banner in composer + preview in message)
 - ✅ Pin viewer modal — `PinModal.jsx` accessible via header icon
-- ✅ Captcha anti-bot — math captcha in registration form
+- ✅ Captcha anti-bot — math captcha + Cloudflare Turnstile in registration form
 - ✅ GIF picker — curated trending GIFs (no API key required)
 
 ### P2 — polish
