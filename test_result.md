@@ -1338,3 +1338,28 @@ agent_communication:
         Test credentials used: admin@centcord.app / CentCordAdmin!2026
         Test server: srv_baba5e7232f24c
         Test user created: testuser_78256@test.com (for permission validation)
+
+
+## 2026-07-XX — Bug fixes: category create, channel delete, message display
+
+### frontend:
+  - task: "Bug fix: Cannot create category, cannot delete channel, message display issue"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/ServerView.jsx, /app/frontend/src/components/modals/ServerSettingsModal.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Fixed 3 user-reported bugs (frontend-only):
+            1. Added "Create Category" form in Server Settings → Categories tab (POST /api/servers/{id}/categories).
+            2. Added channel delete via right-click context menu in ServerView sidebar + channel list with delete buttons in Server Settings → Categories tab (DELETE /api/servers/{id}/channels/{ch_id}).
+            3. Fixed message display: cleared messages on channel switch, stabilized WS subscriptions with activeChannelIdRef pattern (subscribe per server, not per channel), added optimistic message append on send with WS event dedup. The "same message in all salons of category" symptom was caused by NOT clearing the messages array between channel switches.
+
+### agent_communication:
+    - agent: "main"
+      message: |
+        Fixed 3 user-reported bugs (frontend-only changes, no backend modifications). Awaiting user validation in live UI.

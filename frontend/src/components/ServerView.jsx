@@ -47,6 +47,10 @@ export default function ServerView({ servers, reload }) {
   const [unread, setUnread] = useState({}); // { channel_id: count }
   const [profileUserId, setProfileUserId] = useState(null);
   const [voicePresence, setVoicePresence] = useState({}); // { channel_id: [participants] }
+  const [channelMenu, setChannelMenu] = useState(null); // { channel, x, y } | null
+  // Ref to always have the latest active channel_id inside WS callbacks (avoids stale closures)
+  const activeChannelIdRef = React.useRef(null);
+  React.useEffect(() => { activeChannelIdRef.current = channel?.channel_id || null; }, [channel?.channel_id]);
 
   // Compute role color for any member (highest-position role with a non-default color)
   const memberColorMap = React.useMemo(() => {
@@ -106,14 +110,27 @@ export default function ServerView({ servers, reload }) {
   }, [serverId]);
 
   useEffect(() => { loadServer(); loadMembers(); loadEmojis(); loadUnread(); loadVoicePresence(); }, [loadServer, loadMembers, loadEmojis, loadUnread, loadVoicePresence]);
-  useEffect(() => { if (channel?.channel_id && channel.type === "text") { loadMessages(channel.channel_id); markRead(channel.channel_id); } }, [channel, loadMessages, markRead]);
+  // Clear messages immediately on channel switch to avoid bleeding old channel content into the new view
+  useEffect(() => {
+    setMessages([]);
+    if (channel?.channel_id && channel.type === "text") {
+      loadMessages(channel.channel_id);
+      markRead(channel.channel_id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channel?.channel_id, channel?.type]);
   useEffect(() => { setReplyTo(null); setActiveThread(null); }, [channel?.channel_id]);
 
   useEffect(() => {
     if (!ws) return;
     const offC = ws.subscribe("message.create", (m) => {
-      if (m.channel_id === channel?.channel_id && !m.thread_id) {
-        setMessages((prev) => [...prev, m]);
+      const activeId = activeChannelIdRef.current;
+      if (m.channel_id === activeId && !m.thread_id) {
+        setMessages((prev) => {
+          // Avoid duplicates if backend echoes back our own POST result + WS event
+          if (prev.some((x) => x.message_id === m.message_id)) return prev;
+          return [...prev, m];
+        });
         markRead(m.channel_id);
       } else if (m.channel_id && m.author_id !== user?.user_id) {
         setUnread((u) => ({ ...u, [m.channel_id]: (u[m.channel_id] || 0) + 1 }));
@@ -123,7 +140,13 @@ export default function ServerView({ servers, reload }) {
     const offD = ws.subscribe("message.delete", (d) => setMessages((prev) => prev.filter((m) => m.message_id !== d.message_id)));
     const offR = ws.subscribe("message.reaction", (d) => setMessages((prev) => prev.map((m) => m.message_id === d.message_id ? { ...m, reactions: d.reactions } : m)));
     const offChCreate = ws.subscribe("channel.create", () => loadServer());
-    const offChDel = ws.subscribe("channel.delete", () => loadServer());
+    const offChDel = ws.subscribe("channel.delete", (d) => {
+      // If the active channel was deleted, navigate away
+      if (d?.channel_id && d.channel_id === activeChannelIdRef.current) {
+        navigate(`/app/servers/${serverId}`);
+      }
+      loadServer();
+    });
     const offChUpdate = ws.subscribe("channel.update", () => loadServer());
     const offCatCreate = ws.subscribe("category.create", () => loadServer());
     const offCatDel = ws.subscribe("category.delete", () => loadServer());
@@ -160,7 +183,9 @@ export default function ServerView({ servers, reload }) {
       offVoice();
       offThread();
     };
-  }, [ws, channel, loadServer, loadMembers, loadEmojis, markRead, user?.user_id]);
+    // Subscribe ONCE per server (not per channel) - we use activeChannelIdRef for the latest channel
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws, serverId]);
 
   if (!server) {
     return (
@@ -210,8 +235,20 @@ export default function ServerView({ servers, reload }) {
 
   const sendMsg = async (content, attachments, reply_to) => {
     if (!channel) return;
-    try { await api.post(`/channels/${channel.channel_id}/messages`, { content, attachments, reply_to }); }
-    catch (_) { toast.error("Échec de l'envoi"); }
+    const targetChannelId = channel.channel_id;
+    try {
+      const { data } = await api.post(`/channels/${targetChannelId}/messages`, { content, attachments, reply_to });
+      // Optimistically append (dedup against WS event)
+      if (data && data.message_id && targetChannelId === activeChannelIdRef.current) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.message_id === data.message_id)) return prev;
+          return [...prev, data];
+        });
+      }
+    } catch (e) {
+      const detail = e?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Échec de l'envoi");
+    }
   };
 
   const createChannel = (categoryId = null) => {
@@ -221,6 +258,37 @@ export default function ServerView({ servers, reload }) {
   const goToChannel = (cid) => {
     navigate(`/app/servers/${serverId}/channels/${cid}`);
     if (isMobile) closeDrawer();
+  };
+
+  const openChannelMenu = (e, ch) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setChannelMenu({ channel: ch, x: e.clientX, y: e.clientY });
+  };
+
+  const renameChannel = async (ch) => {
+    setChannelMenu(null);
+    const name = window.prompt("Nouveau nom du salon", ch.name);
+    if (!name || name === ch.name) return;
+    try {
+      await api.patch(`/servers/${serverId}/channels/${ch.channel_id}`, { name });
+      toast.success("Salon renommé");
+      loadServer();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Échec"); }
+  };
+
+  const deleteChannel = async (ch) => {
+    setChannelMenu(null);
+    if (!window.confirm(`Supprimer définitivement le salon « #${ch.name} » et tous ses messages ?`)) return;
+    try {
+      await api.delete(`/servers/${serverId}/channels/${ch.channel_id}`);
+      toast.success("Salon supprimé");
+      // If we deleted the active channel, navigate away
+      if (ch.channel_id === channel?.channel_id) {
+        navigate(`/app/servers/${serverId}`);
+      }
+      loadServer();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Échec"); }
   };
 
   const handleCreateThread = async (parentMsg) => {
@@ -271,6 +339,7 @@ export default function ServerView({ servers, reload }) {
                         <li key={c.channel_id}>
                           <button
                             onClick={() => goToChannel(c.channel_id)}
+                            onContextMenu={(e) => openChannelMenu(e, c)}
                             data-testid={`channel-${c.channel_id}`}
                             className={cn(
                               "w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors",
@@ -316,7 +385,7 @@ export default function ServerView({ servers, reload }) {
                 const vps = voicePresence[c.channel_id] || [];
                 return (
                   <li key={c.channel_id}>
-                    <button onClick={() => goToChannel(c.channel_id)} className={cn("w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors", active ? "bg-cc-surface2 text-cc-text" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text")}>
+                    <button onClick={() => goToChannel(c.channel_id)} onContextMenu={(e) => openChannelMenu(e, c)} className={cn("w-full flex items-center gap-2 px-3 py-1.5 text-sm transition-colors", active ? "bg-cc-surface2 text-cc-text" : "text-cc-subtext hover:bg-cc-surface2 hover:text-cc-text")}>
                       <Ic className="w-4 h-4 text-cc-muted shrink-0" />
                       <span className="truncate flex-1 text-left">{c.name}</span>
                       {c.type === "voice" && vps.length > 0 && (
@@ -406,6 +475,33 @@ export default function ServerView({ servers, reload }) {
       {openPins && channel && <PinModal channelId={channel.channel_id} onClose={() => setOpenPins(false)} />}
       {openSearch && <SearchModal serverId={serverId} onClose={() => setOpenSearch(false)} />}
       {profileUserId && <UserProfilePopover userId={profileUserId} onClose={() => setProfileUserId(null)} />}
+
+      {/* Channel context menu (right-click on channel) */}
+      {channelMenu && (
+        <>
+          <div className="fixed inset-0 z-[60]" onClick={() => setChannelMenu(null)} onContextMenu={(e) => { e.preventDefault(); setChannelMenu(null); }} />
+          <div
+            className="fixed z-[61] bg-cc-surface1 border border-cc-border shadow-lg min-w-[180px] py-1"
+            style={{
+              left: Math.min(channelMenu.x, (typeof window !== "undefined" ? window.innerWidth : 1000) - 200),
+              top: Math.min(channelMenu.y, (typeof window !== "undefined" ? window.innerHeight : 800) - 120),
+            }}
+            data-testid="channel-context-menu"
+          >
+            <div className="px-3 py-1.5 text-[10px] uppercase tracking-widest font-bold text-cc-muted truncate">#{channelMenu.channel.name}</div>
+            <button
+              onClick={() => renameChannel(channelMenu.channel)}
+              className="w-full text-left px-3 py-2 text-sm text-cc-text hover:bg-cc-surface2 transition-colors"
+              data-testid="ctx-rename-channel"
+            >Renommer</button>
+            <button
+              onClick={() => deleteChannel(channelMenu.channel)}
+              className="w-full text-left px-3 py-2 text-sm text-cc-danger hover:bg-cc-surface2 transition-colors"
+              data-testid="ctx-delete-channel"
+            >Supprimer le salon</button>
+          </div>
+        </>
+      )}
     </>
   );
 }

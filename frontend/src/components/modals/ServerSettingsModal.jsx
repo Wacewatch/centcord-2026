@@ -38,6 +38,8 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
   const [tagsInput, setTagsInput] = useState((server.tags || []).join(", "));
   const [stats, setStats] = useState(null);
   const [categoriesList, setCategoriesList] = useState(server.categories || []);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [creatingCategory, setCreatingCategory] = useState(false);
   const [stickers, setStickers] = useState([]);
   const [newSticker, setNewSticker] = useState({ name: "", image_url: "", tags: "" });
   const [saving, setSaving] = useState(false);
@@ -131,6 +133,43 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
       await api.delete(`/servers/${server.server_id}/categories/${cat.category_id}`);
       setCategoriesList(categoriesList.filter(c => c.category_id !== cat.category_id));
       toast.success("Supprimée"); reload();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Échec"); }
+  };
+
+  const createCategory = async () => {
+    const name = (newCategoryName || "").trim();
+    if (name.length < 1) { toast.error("Le nom est requis"); return; }
+    setCreatingCategory(true);
+    try {
+      const { data } = await api.post(`/servers/${server.server_id}/categories`, { name });
+      setCategoriesList([...categoriesList, data]);
+      setNewCategoryName("");
+      toast.success(`Catégorie « ${data.name} » créée`);
+      reload();
+    } catch (e) {
+      const d = e?.response?.data?.detail;
+      toast.error(typeof d === "string" ? d : "Échec de la création");
+    } finally { setCreatingCategory(false); }
+  };
+
+  const deleteChannelFromSettings = async (ch) => {
+    if (!window.confirm(`Supprimer définitivement le salon « #${ch.name} » et tous ses messages ?`)) return;
+    try {
+      await api.delete(`/servers/${server.server_id}/channels/${ch.channel_id}`);
+      toast.success("Salon supprimé");
+      reload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Échec");
+    }
+  };
+
+  const renameChannelFromSettings = async (ch) => {
+    const name = window.prompt("Nouveau nom du salon", ch.name);
+    if (!name || name === ch.name) return;
+    try {
+      await api.patch(`/servers/${server.server_id}/channels/${ch.channel_id}`, { name });
+      toast.success("Salon renommé");
+      reload();
     } catch (e) { toast.error(e?.response?.data?.detail || "Échec"); }
   };
 
@@ -509,16 +548,84 @@ export default function ServerSettingsModal({ server, onClose, reload }) {
           )}
           {tab === "categories" && (
             <div>
-              <h3 className="font-display font-extrabold text-2xl uppercase tracking-tighter mb-4">Catégories</h3>
-              <ul className="space-y-2">
-                {categoriesList.map((cat) => (
-                  <li key={cat.category_id} className="border border-cc-border bg-cc-surface2 px-3 py-2 flex items-center gap-3">
-                    <span className="font-display font-bold uppercase text-sm flex-1">{cat.name}</span>
-                    <button onClick={() => renameCategory(cat)} data-testid={`cat-rename-${cat.category_id}`} className="text-[10px] uppercase tracking-widest font-bold text-cc-accent hover:text-cc-text">Renommer</button>
-                    <button onClick={() => deleteCategory(cat)} className="text-[10px] uppercase tracking-widest font-bold text-cc-muted hover:text-cc-danger">Supprimer</button>
-                  </li>
-                ))}
-                {categoriesList.length === 0 && <li className="text-cc-muted text-xs uppercase tracking-widest">Aucune catégorie.</li>}
+              <h3 className="font-display font-extrabold text-2xl uppercase tracking-tighter mb-4">Catégories &amp; salons</h3>
+
+              {/* Create category form */}
+              <div className="border border-cc-border bg-cc-surface2 p-3 mb-5">
+                <div className="text-[10px] uppercase tracking-widest font-bold text-cc-muted mb-2">Nouvelle catégorie</div>
+                <div className="flex gap-2">
+                  <input
+                    value={newCategoryName}
+                    onChange={(e) => setNewCategoryName(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && createCategory()}
+                    placeholder="Nom de la catégorie (ex: GÉNÉRAL)"
+                    data-testid="category-name-input"
+                    maxLength={32}
+                    className="flex-1 bg-cc-base border border-cc-border focus:border-cc-accent outline-none px-3 py-2 font-jetbrains text-sm uppercase"
+                  />
+                  <button
+                    onClick={createCategory}
+                    disabled={creatingCategory || !newCategoryName.trim()}
+                    data-testid="category-create-btn"
+                    className="bg-cc-accent text-white font-bold uppercase tracking-wide px-4 py-2 cc-brutal-shadow cc-brutal-press disabled:opacity-50"
+                  >
+                    {creatingCategory ? "..." : "Créer"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Categories list with channels nested */}
+              <ul className="space-y-3">
+                {categoriesList.map((cat) => {
+                  const catChannels = (server.channels || []).filter(c => c.category_id === cat.category_id);
+                  return (
+                    <li key={cat.category_id} className="border border-cc-border bg-cc-surface2">
+                      <div className="px-3 py-2 flex items-center gap-3 border-b border-cc-border">
+                        <span className="font-display font-bold uppercase text-sm flex-1">{cat.name}</span>
+                        <span className="text-[10px] uppercase tracking-widest text-cc-muted">{catChannels.length} salon{catChannels.length !== 1 ? "s" : ""}</span>
+                        <button onClick={() => renameCategory(cat)} data-testid={`cat-rename-${cat.category_id}`} className="text-[10px] uppercase tracking-widest font-bold text-cc-accent hover:text-cc-text">Renommer</button>
+                        <button onClick={() => deleteCategory(cat)} data-testid={`cat-delete-${cat.category_id}`} className="text-[10px] uppercase tracking-widest font-bold text-cc-muted hover:text-cc-danger">Supprimer</button>
+                      </div>
+                      {catChannels.length > 0 && (
+                        <ul className="divide-y divide-cc-border">
+                          {catChannels.map((ch) => (
+                            <li key={ch.channel_id} className="px-3 py-1.5 flex items-center gap-3 text-xs">
+                              <span className="text-cc-muted shrink-0">{ch.type === "voice" ? "🔊" : ch.type === "announcement" ? "📢" : ch.type === "forum" ? "📚" : "#"}</span>
+                              <span className="font-jetbrains text-cc-text flex-1 truncate">{ch.name}</span>
+                              <button onClick={() => renameChannelFromSettings(ch)} className="text-[10px] uppercase tracking-widest font-bold text-cc-accent hover:text-cc-text">Renommer</button>
+                              <button onClick={() => deleteChannelFromSettings(ch)} data-testid={`ch-delete-${ch.channel_id}`} className="text-[10px] uppercase tracking-widest font-bold text-cc-muted hover:text-cc-danger">Supprimer</button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </li>
+                  );
+                })}
+                {/* Uncategorized channels */}
+                {(() => {
+                  const uncat = (server.channels || []).filter(c => !c.category_id);
+                  if (uncat.length === 0) return null;
+                  return (
+                    <li className="border border-cc-border bg-cc-surface2">
+                      <div className="px-3 py-2 border-b border-cc-border">
+                        <span className="font-display font-bold uppercase text-sm text-cc-muted">Sans catégorie</span>
+                      </div>
+                      <ul className="divide-y divide-cc-border">
+                        {uncat.map((ch) => (
+                          <li key={ch.channel_id} className="px-3 py-1.5 flex items-center gap-3 text-xs">
+                            <span className="text-cc-muted shrink-0">{ch.type === "voice" ? "🔊" : ch.type === "announcement" ? "📢" : ch.type === "forum" ? "📚" : "#"}</span>
+                            <span className="font-jetbrains text-cc-text flex-1 truncate">{ch.name}</span>
+                            <button onClick={() => renameChannelFromSettings(ch)} className="text-[10px] uppercase tracking-widest font-bold text-cc-accent hover:text-cc-text">Renommer</button>
+                            <button onClick={() => deleteChannelFromSettings(ch)} data-testid={`ch-delete-${ch.channel_id}`} className="text-[10px] uppercase tracking-widest font-bold text-cc-muted hover:text-cc-danger">Supprimer</button>
+                          </li>
+                        ))}
+                      </ul>
+                    </li>
+                  );
+                })()}
+                {categoriesList.length === 0 && (server.channels || []).length === 0 && (
+                  <li className="text-cc-muted text-xs uppercase tracking-widest">Aucune catégorie.</li>
+                )}
               </ul>
             </div>
           )}
