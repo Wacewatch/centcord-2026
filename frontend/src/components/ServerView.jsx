@@ -560,7 +560,7 @@ export default function ServerView({ servers, reload }) {
       {activeThread && <ThreadPanel thread={activeThread.thread} parentMessage={activeThread.parent} onClose={() => setActiveThread(null)} />}
       {showMembers && !activeThread && <MembersSidebar members={members} server={server} reload={loadMembers} />}
       {openSettings && <ServerSettingsModal server={server} reload={() => { loadServer(); reload && reload(); }} onClose={() => setOpenSettings(false)} />}
-      {openCreateChannel && <CreateChannelModal serverId={serverId} categories={server.categories || []} defaultCategoryId={openCreateChannel.categoryId} onClose={() => setOpenCreateChannel(null)} onCreated={() => loadServer()} />}
+      {openCreateChannel && <CreateChannelModal serverId={serverId} categories={server.categories || []} defaultCategoryId={openCreateChannel.categoryId} voiceChannelExists={(server.channels || []).some(c => c.type === "voice")} onClose={() => setOpenCreateChannel(null)} onCreated={() => loadServer()} />}
       {openPins && channel && <PinModal channelId={channel.channel_id} onClose={() => setOpenPins(false)} />}
       {openSearch && <SearchModal serverId={serverId} onClose={() => setOpenSearch(false)} />}
       {profileUserId && <UserProfilePopover userId={profileUserId} onClose={() => setProfileUserId(null)} />}

@@ -1363,3 +1363,125 @@ agent_communication:
     - agent: "main"
       message: |
         Fixed 3 user-reported bugs (frontend-only changes, no backend modifications). Awaiting user validation in live UI.
+
+
+## 2026-07-XX — Major feature/bug pass + Glassmorphism redesign + LiveKit voice
+
+### backend:
+  - task: "LiveKit voice token endpoint + 1 voice channel/server limit + change-password + reorder endpoints + announcement channel send permission"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py, /app/backend/.env"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Backend additions:
+            - POST /api/voice/livekit/token — mints short-lived (1h) LiveKit access token using LIVEKIT_URL/KEY/SECRET from .env. Validates membership and channel type (voice).
+            - POST /api/users/me/change-password — verifies current password, updates with new hash. Returns 400 on wrong password / same / too short.
+            - POST /api/servers/{id}/channels/reorder — bulk update positions and category_id (drag-and-drop reorder).
+            - POST /api/servers/{id}/categories/reorder — same for categories.
+            - send_message now blocks non-MANAGE_MESSAGES users from posting in announcement channels.
+            - create_channel enforces 1 voice channel per server (returns 400 if a voice channel already exists).
+            - Admin user auto-seeded on startup using ADMIN_EMAIL/ADMIN_PASSWORD env vars.
+            - LiveKit credentials saved in /app/backend/.env (LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET).
+            - JSON-serialization bug for create_category fixed by testing agent in previous round; same fix applied to create_channel (broadcast clean dict without _id).
+            
+            Manual smoke tests performed:
+            - Login → get_servers → create voice channel (200) → create second voice (blocks with 400 + correct message)
+            - Token endpoint returns valid JWT, server_url, room — verified against LiveKit Cloud account.
+
+### frontend:
+  - task: "Glassmorphism redesign + LiveKit voice room + drag-drop channels + edit topic + change password UI + remove boost + announcement/forum visual differentiation"
+    implemented: true
+    working: "NA"
+    file: |
+      /app/frontend/src/index.css
+      /app/frontend/src/components/ServerView.jsx
+      /app/frontend/src/components/VoiceRoom.jsx
+      /app/frontend/src/components/SortableChannelList.jsx (NEW)
+      /app/frontend/src/components/SettingsPage.jsx
+      /app/frontend/src/components/modals/ServerSettingsModal.jsx
+      /app/frontend/src/components/modals/CreateChannelModal.jsx
+      /app/frontend/src/components/BoostBadge.jsx (DELETED)
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Major frontend overhaul:
+            
+            1. **Glassmorphism redesign** (full rewrite of index.css):
+               - Dark base #06060B with multi-layer aurora gradients (orange #FF3B00 retained as accent)
+               - All bg-cc-surface*/bg-cc-base classes are now translucent + backdrop-blur(20-28px) saturate(150-160%)
+               - Borders softened to rgba(255,255,255,0.08)
+               - Modern typography: Outfit (display), Inter (body), JetBrains Mono (code)
+               - Rounded corners (12-16px), subtle inset highlights, gradient buttons with glow
+               - Animated drift on aurora blobs (28s loop)
+               - Light-mode token override preserved for the existing theme toggle.
+            
+            2. **LiveKit voice integration** (VoiceRoom.jsx fully rewritten):
+               - Uses livekit-client SDK directly. Calls /api/voice/livekit/token, then `room.connect(serverUrl, token)`.
+               - Auto-publishes mic with echo cancellation / noise suppression / AGC.
+               - Live participants grid with avatar + speaking indicator (orange glow ring) + mute badge.
+               - Mute / Deafen / Hangup controls. Deafen mutes all <audio> elements DOM-side.
+               - Calls /voice/channels/{id}/join + /leave to keep our existing presence WebSocket counter accurate (sidebar badge).
+               - beforeunload + unmount cleanup with keepalive fetch.
+            
+            3. **Drag-and-drop channels** (new SortableChannelList.jsx):
+               - @dnd-kit/core + @dnd-kit/sortable (installed).
+               - Per-category SortableContext. Grip handle visible on hover.
+               - onDragEnd → POST /api/servers/{id}/channels/reorder.
+               - Cross-category move handled via right-click context menu → "Déplacer vers" → list of categories or "Sans catégorie".
+            
+            4. **Edit channel topic inline**:
+               - Click on the topic text in the channel header (data-testid="topic-display") → input (data-testid="topic-input") → Enter saves → escape cancels.
+               - Calls PATCH /api/servers/{id}/channels/{ch_id} with {topic}.
+            
+            5. **Change password page** (Confidentialité & sécurité):
+               - 3 inputs (current/new/confirm) with client-side validation (length, mismatch, same as current).
+               - Calls POST /api/users/me/change-password.
+            
+            6. **Boost system removed**:
+               - BoostBadge component deleted.
+               - All UI references removed (server header badge, settings stats card).
+               - Backend WS subscriptions for boost events removed from ServerView.
+            
+            7. **Forum / Announcement channel differentiation**:
+               - Banner at top of channel: Megaphone (announce) / BookOpen (forum) with explanation.
+               - Announcement channels: composer hidden for non-admin/non-MANAGE_MESSAGES users (shows "Vous n'avez pas la permission" message). Server-side enforced.
+               - Composer placeholder text adapts ("Annonce dans #...", "Nouveau post dans #...").
+            
+            8. **1 voice channel per server limit**:
+               - CreateChannelModal disables the Voice tile when voiceChannelExists prop is true.
+               - ServerView passes (server.channels || []).some(c => c.type === "voice").
+            
+            9. **Previous round bug fixes** (still in place, validated by tests in prior turn):
+               - Messages clear on channel switch.
+               - WS subscribed once per server with activeChannelIdRef pattern.
+               - Optimistic send + WS dedup.
+               - Right-click context menu for delete/rename.
+               - Create category form in settings.
+
+### agent_communication:
+    - agent: "main"
+      message: |
+        Completed all user-requested features in one large pass:
+        - Phase A bugs: forum/announce visual differentiation, edit topic, change password, remove boost, drag-drop reorder + cross-category move
+        - Phase B voice: full LiveKit integration with provided credentials. 1 voice channel/server limit.
+        - Phase C visual: complete glassmorphism redesign keeping orange #FF3B00 accent.
+        
+        Backend smoke-tested manually (login + create voice + voice limit + token endpoint).
+        Frontend compiles without lint errors. Need full end-to-end UI test:
+          - Login flow stability (testing agent had button selector issue last time)
+          - Test all 3 phases — especially LiveKit voice join/mute/leave (will require allowing mic in test browser)
+          - Mobile responsiveness at 390x800 viewport
+        
+        IMPORTANT for testing agent:
+          - Login button text is "Se connecter" (French). Use page.get_by_role("button", name=...) with broader matching.
+          - Admin credentials are in /app/memory/test_credentials.md.

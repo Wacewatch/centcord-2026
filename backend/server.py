@@ -1013,6 +1013,11 @@ async def delete_category(server_id: str, category_id: str, user: dict = Depends
 @api.post("/servers/{server_id}/channels")
 async def create_channel(server_id: str, payload: CreateChannelIn, user: dict = Depends(get_current_user)):
     await require_membership(server_id, user, PERM_MANAGE_CHANNELS)
+    # Limit: only 1 voice channel per server
+    if payload.type == "voice":
+        existing_voice = await db.channels.count_documents({"server_id": server_id, "type": "voice"})
+        if existing_voice >= 1:
+            raise HTTPException(status_code=400, detail="Un seul salon vocal est autorisé par serveur. Supprimez l'existant pour en créer un nouveau.")
     pos = await db.channels.count_documents({"server_id": server_id})
     doc = {
         "channel_id": gen_id("ch"), "server_id": server_id,
@@ -1794,6 +1799,67 @@ class VoiceSignalIn(BaseModel):
     to: Optional[str] = None
     event: Optional[str] = None
     data: Optional[Dict[str, Any]] = None
+
+
+# ============================================================
+# LiveKit voice integration — generates short-lived access tokens
+# scoped to a channel (used as the LiveKit room name).
+# ============================================================
+class LiveKitTokenIn(BaseModel):
+    channel_id: str
+
+@api.post("/voice/livekit/token")
+async def livekit_token(payload: LiveKitTokenIn, user: dict = Depends(get_current_user)):
+    """Generate a LiveKit access token for the current user to join the
+    voice channel as a room. Server URL is returned for the client to connect."""
+    livekit_url = os.environ.get("LIVEKIT_URL")
+    api_key = os.environ.get("LIVEKIT_API_KEY")
+    api_secret = os.environ.get("LIVEKIT_API_SECRET")
+    if not (livekit_url and api_key and api_secret):
+        raise HTTPException(status_code=503, detail="Le serveur vocal n'est pas configuré.")
+
+    # Validate the channel exists and user has VIEW permission
+    ch = await db.channels.find_one({"channel_id": payload.channel_id}, {"_id": 0})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Salon introuvable.")
+    if ch.get("type") != "voice":
+        raise HTTPException(status_code=400, detail="Ce salon n'est pas vocal.")
+    await require_membership(ch["server_id"], user, PERM_VIEW)
+    await assert_not_timed_out(ch["server_id"], user["user_id"])
+
+    try:
+        from livekit import api as lkapi
+    except Exception as e:
+        log.error(f"livekit-api not installed: {e}")
+        raise HTTPException(status_code=503, detail="SDK LiveKit indisponible.")
+
+    # Build token: identity, name (display), grants for the channel as the room
+    display_name = user.get("display_name") or user.get("email") or user["user_id"]
+    token = (
+        lkapi.AccessToken(api_key, api_secret)
+        .with_identity(user["user_id"])
+        .with_name(display_name)
+        .with_metadata(json.dumps({
+            "user_id": user["user_id"],
+            "avatar_url": user.get("avatar_url") or "",
+        }))
+        .with_grants(lkapi.VideoGrants(
+            room_join=True,
+            room=payload.channel_id,
+            can_publish=True,
+            can_subscribe=True,
+            can_publish_data=True,
+        ))
+        .with_ttl(timedelta(hours=1))
+    )
+
+    return {
+        "server_url": livekit_url,
+        "token": token.to_jwt(),
+        "room": payload.channel_id,
+        "identity": user["user_id"],
+    }
+
 
 @api.post("/voice/signal")
 async def voice_signal(payload: VoiceSignalIn, user: dict = Depends(get_current_user)):

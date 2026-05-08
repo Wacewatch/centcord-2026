@@ -11,7 +11,7 @@ const TYPES = [
   { id: "forum", label: "Forum", desc: "Conversations organisées en posts.", icon: BookOpen, color: "from-emerald-500/20 to-emerald-600/5" },
 ];
 
-export default function CreateChannelModal({ serverId, categories = [], defaultCategoryId = null, onClose, onCreated }) {
+export default function CreateChannelModal({ serverId, categories = [], defaultCategoryId = null, voiceChannelExists = false, onClose, onCreated }) {
   const [type, setType] = useState("text");
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
@@ -60,16 +60,21 @@ export default function CreateChannelModal({ serverId, categories = [], defaultC
             {TYPES.map((t) => {
               const Icon = t.icon;
               const active = t.id === type;
+              const disabled = t.id === "voice" && voiceChannelExists;
               return (
                 <button
                   key={t.id}
-                  onClick={() => setType(t.id)}
+                  onClick={() => !disabled && setType(t.id)}
+                  disabled={disabled}
                   data-testid={`channel-type-${t.id}`}
                   className={`group relative text-left p-4 rounded-xl border transition-all ${
-                    active
+                    disabled
+                      ? "border-cc-border bg-cc-surface1 opacity-40 cursor-not-allowed"
+                      : active
                       ? "border-cc-accent bg-gradient-to-br " + t.color + " shadow-[0_0_0_3px_rgba(255,59,0,0.12)]"
                       : "border-cc-border bg-cc-surface1 hover:border-cc-accent/40 hover:bg-cc-surface2"
                   }`}
+                  title={disabled ? "Un seul salon vocal est autorisé par serveur." : ""}
                 >
                   <div className="flex items-start gap-3">
                     <div className={`p-2 rounded-lg ${active ? "bg-cc-accent text-white" : "bg-cc-surface2 text-cc-subtext group-hover:text-cc-accent"} transition-colors`}>
@@ -77,9 +82,11 @@ export default function CreateChannelModal({ serverId, categories = [], defaultC
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="font-display font-semibold text-[15px] text-cc-text">{t.label}</div>
-                      <div className="text-[12px] text-cc-subtext mt-0.5 leading-snug">{t.desc}</div>
+                      <div className="text-[12px] text-cc-subtext mt-0.5 leading-snug">
+                        {disabled ? "Déjà présent — limite de 1 par serveur." : t.desc}
+                      </div>
                     </div>
-                    {active && <Sparkles className="w-3.5 h-3.5 text-cc-accent shrink-0 mt-1" />}
+                    {active && !disabled && <Sparkles className="w-3.5 h-3.5 text-cc-accent shrink-0 mt-1" />}
                   </div>
                 </button>
               );
