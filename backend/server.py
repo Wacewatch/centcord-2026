@@ -1000,7 +1000,9 @@ async def create_channel(server_id: str, payload: CreateChannelIn, user: dict = 
         "created_at": now_iso(),
     }
     await db.channels.insert_one(doc)
-    await hub.broadcast_server(server_id, "channel.create", doc)
+    # Create clean broadcast doc without _id field to avoid JSON serialization error
+    broadcast_doc = {k: v for k, v in doc.items() if k != "_id"}
+    await hub.broadcast_server(server_id, "channel.create", broadcast_doc)
     doc.pop("_id", None)
     return doc
 
