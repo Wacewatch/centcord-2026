@@ -36,8 +36,6 @@ JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALG = "HS256"
 ACCESS_TTL_MIN = 60 * 24       # 1 day for dev convenience
 REFRESH_TTL_DAYS = 30
-ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@centcord.app')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 APP_NAME = os.environ.get('APP_NAME', 'centcord')
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
@@ -3395,23 +3393,6 @@ async def on_startup():
     await db.bots.create_index("token", unique=True, sparse=True)
     log.info("Indexes ensured")
 
-    # Seed admin
-    admin = await db.users.find_one({"email": ADMIN_EMAIL})
-    if not admin:
-        await db.users.insert_one({
-            "user_id": gen_id("usr"),
-            "email": ADMIN_EMAIL.lower(),
-            "password_hash": hash_password(ADMIN_PASSWORD),
-            "display_name": "Admin",
-            "avatar_url": None, "banner_url": None, "bio": "Founder of CentCord",
-            "pronouns": "", "accent_color": "#FF3B00", "status": "online", "custom_status": "",
-            "role": "admin", "auth_provider": "password", "public_key": None,
-            "created_at": now_iso(),
-        })
-        log.info("Admin user seeded")
-    elif not admin.get("password_hash") or not verify_password(ADMIN_PASSWORD, admin["password_hash"]):
-        await db.users.update_one({"email": ADMIN_EMAIL}, {"$set": {"password_hash": hash_password(ADMIN_PASSWORD), "role": "admin"}})
-        log.info("Admin password updated")
 
     # Init storage
     init_storage()
