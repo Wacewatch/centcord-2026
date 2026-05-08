@@ -974,7 +974,9 @@ async def create_category(server_id: str, payload: CreateCategoryIn, user: dict 
     doc = {"category_id": gen_id("cat"), "server_id": server_id, "name": payload.name.upper(),
            "position": pos, "created_at": now_iso()}
     await db.categories.insert_one(doc)
-    await hub.broadcast_server(server_id, "category.create", doc)
+    # Create clean broadcast doc without _id field to avoid JSON serialization error
+    broadcast_doc = {k: v for k, v in doc.items() if k != "_id"}
+    await hub.broadcast_server(server_id, "category.create", broadcast_doc)
     doc.pop("_id", None)
     return doc
 
@@ -3396,6 +3398,36 @@ async def on_startup():
 
     # Init storage
     init_storage()
+
+    # Seed admin user (idempotent)
+    try:
+        admin_email = os.environ.get("ADMIN_EMAIL")
+        admin_password = os.environ.get("ADMIN_PASSWORD")
+        if admin_email and admin_password:
+            existing = await db.users.find_one({"email": admin_email}, {"_id": 0})
+            if not existing:
+                doc = {
+                    "user_id": gen_id("usr"),
+                    "email": admin_email,
+                    "password_hash": hash_password(admin_password),
+                    "display_name": "Admin",
+                    "avatar_url": None,
+                    "banner_url": None,
+                    "bio": "",
+                    "pronouns": "",
+                    "accent_color": "#FF3B00",
+                    "status": "online",
+                    "custom_status": "",
+                    "role": "admin",
+                    "created_at": now_iso(),
+                }
+                await db.users.insert_one(doc)
+                log.info(f"Seeded admin user {admin_email}")
+            elif existing.get("role") != "admin":
+                await db.users.update_one({"email": admin_email}, {"$set": {"role": "admin"}})
+                log.info(f"Promoted {admin_email} to admin")
+    except Exception as e:
+        log.warning(f"Admin seeding skipped: {e}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
