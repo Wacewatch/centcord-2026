@@ -903,6 +903,40 @@ async def discover_servers(q: Optional[str] = None, user: dict = Depends(get_cur
         s["member_count"] = await db.members.count_documents({"server_id": s["server_id"]})
     return servers
 
+
+@api.get("/servers/unread")
+async def list_servers_unread(user: dict = Depends(get_current_user)):
+    """Returns {server_id: count} aggregated unread per server (sum of all its channels).
+
+    NOTE: Defined BEFORE /servers/{server_id} so FastAPI does not match 'unread'
+    as a server_id parameter (which previously caused a 403 'Not a member').
+    """
+    members = await db.members.find({"user_id": user["user_id"]}, {"_id": 0, "server_id": 1}).to_list(500)
+    server_ids = [m["server_id"] for m in members]
+    if not server_ids:
+        return {}
+    channels = await db.channels.find({"server_id": {"$in": server_ids}}, {"_id": 0, "channel_id": 1, "server_id": 1}).to_list(2000)
+    markers = await db.read_markers.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(2000)
+    marker_map = {m["channel_id"]: m.get("last_read_message_id") for m in markers}
+    out: Dict[str, int] = {}
+    for ch in channels:
+        cid = ch["channel_id"]
+        sid = ch["server_id"]
+        last_id = marker_map.get(cid)
+        if last_id:
+            last_msg = await db.messages.find_one({"message_id": last_id}, {"_id": 0, "created_at": 1})
+            cutoff = last_msg["created_at"] if last_msg else None
+            q = {"channel_id": cid, "deleted": {"$ne": True}, "author_id": {"$ne": user["user_id"]}}
+            if cutoff:
+                q["created_at"] = {"$gt": cutoff}
+            count = await db.messages.count_documents(q)
+        else:
+            count = await db.messages.count_documents({"channel_id": cid, "deleted": {"$ne": True}, "author_id": {"$ne": user["user_id"]}})
+        if count > 0:
+            out[sid] = out.get(sid, 0) + count
+    return out
+
+
 @api.get("/servers/{server_id}")
 async def get_server(server_id: str, user: dict = Depends(get_current_user)):
     await require_membership(server_id, user)
@@ -2556,35 +2590,6 @@ async def list_unread(user: dict = Depends(get_current_user)):
             count = await db.messages.count_documents({"channel_id": cid, "deleted": {"$ne": True}, "author_id": {"$ne": user["user_id"]}})
         if count > 0:
             out[cid] = count
-    return out
-
-
-@api.get("/servers/unread")
-async def list_servers_unread(user: dict = Depends(get_current_user)):
-    """Returns {server_id: count} aggregated unread per server (sum of all its channels)."""
-    members = await db.members.find({"user_id": user["user_id"]}, {"_id": 0, "server_id": 1}).to_list(500)
-    server_ids = [m["server_id"] for m in members]
-    if not server_ids:
-        return {}
-    channels = await db.channels.find({"server_id": {"$in": server_ids}}, {"_id": 0, "channel_id": 1, "server_id": 1}).to_list(2000)
-    markers = await db.read_markers.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(2000)
-    marker_map = {m["channel_id"]: m.get("last_read_message_id") for m in markers}
-    out: Dict[str, int] = {}
-    for ch in channels:
-        cid = ch["channel_id"]
-        sid = ch["server_id"]
-        last_id = marker_map.get(cid)
-        if last_id:
-            last_msg = await db.messages.find_one({"message_id": last_id}, {"_id": 0, "created_at": 1})
-            cutoff = last_msg["created_at"] if last_msg else None
-            q = {"channel_id": cid, "deleted": {"$ne": True}, "author_id": {"$ne": user["user_id"]}}
-            if cutoff:
-                q["created_at"] = {"$gt": cutoff}
-            count = await db.messages.count_documents(q)
-        else:
-            count = await db.messages.count_documents({"channel_id": cid, "deleted": {"$ne": True}, "author_id": {"$ne": user["user_id"]}})
-        if count > 0:
-            out[sid] = out.get(sid, 0) + count
     return out
 
 

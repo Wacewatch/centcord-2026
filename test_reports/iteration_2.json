@@ -1,0 +1,24 @@
+{
+  "summary": "Verified bug fix for UI freeze caused by /api/servers/unread route ordering, the new /me/rail folder/layout endpoints, and the frontend changes (no file-attach in MessageComposer; drag-and-drop server folders in ServerRail). Wrote 9 new pytest cases — all passing. Frontend Playwright run (admin login → /app/me → click server → DnD folder → right-click menu) fully succeeds with 0 x 403 errors on /api/servers/unread.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_rail_unread.py",
+    "/app/backend/tests/test_centcord_api.py",
+    "/app/test_reports/pytest/pytest_rail_unread.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now ~3580 lines — strongly recommend splitting (auth, servers, channels, messages, dms, rail, etc.) for maintainability.",
+    "MessageComposer correctly removed file-attach UI/state; verify backend /api/uploads is still needed for avatars/icons/banners only — consider scoping to those routes if file-sharing in chat is permanently disabled.",
+    "ServerRail uses @dnd-kit + debounced PUT /me/rail; consider adding optimistic conflict resolution in case two tabs save concurrently."
+  ],
+  "updated_files": ["/app/backend/tests/test_rail_unread.py"],
+  "success_rate": {"backend": "100% (9/9 new + previously 53/54)", "frontend": "100% on tested flows"},
+  "test_credentials": "admin@centcord.app / CentCordAdmin!2026; new test user registered with turnstile_token bypass (always-pass test key 1x000... secret).",
+  "seed_data_creation": "Created TEST_RailSrv0_*, TEST_RailSrv1_* (deleted in fixture teardown). Frontend DnD test created 'TEST_DnD2' server under admin (left in DB; can be cleaned up manually).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Bug fix verified end-to-end. Tests live in /app/backend/tests/test_rail_unread.py. Run: pytest /app/backend/tests/test_rail_unread.py -v. Captcha: backend uses Cloudflare Turnstile always-pass test key by default (TURNSTILE_SECRET=1x0000...AA), so any non-empty turnstile_token passes verify_turnstile(). Tests pass 'turnstile_token': 'test-bypass-token'. Frontend testing: login at /auth (data-testid auth-input-email/auth-input-password, click 'SE CONNECTER' text — button is NOT type=submit). Token stored in localStorage under key 'cc_access_token'. Drag-drop in ServerRail uses @dnd-kit and triggers folder creation when a server is dropped onto another (verified working).",
+  "rca of the issue": "Root cause: FastAPI matched GET /api/servers/unread as /api/servers/{server_id} because the parameterized route was declared first; the unread endpoint then ran require_membership on server_id='unread' and rejected with 403. Frontend polled this every 30s, leading to repeated failures and, in some flows, a state-update loop that froze the UI. Fix verified: /api/servers/unread now defined at line 907 (BEFORE /servers/{server_id} at line 940). Test test_servers_unread_returns_200_for_admin and test_servers_unread_returns_200_for_new_user both 200 OK. Frontend run shows 0 403s on /api/servers/unread."
+}
