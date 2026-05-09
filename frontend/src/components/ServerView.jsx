@@ -173,6 +173,14 @@ export default function ServerView({ servers, reload }) {
       // Mark parent message as having a thread
       setMessages((prev) => prev.map((m) => m.message_id === t.parent_message_id ? { ...m, thread_id: t.thread_id } : m));
     });
+    const offPresence = ws.subscribe("presence.update", (data) => {
+      // Update member presence in real-time
+      setMembers((prev) => prev.map((m) =>
+        m.user_id === data.user_id
+          ? { ...m, user: { ...m.user, status: data.status, custom_status: data.custom_status } }
+          : m
+      ));
+    });
     return () => {
       offC(); offU(); offD(); offR();
       offChCreate(); offChDel(); offChUpdate();
@@ -184,6 +192,7 @@ export default function ServerView({ servers, reload }) {
       offEmCreate(); offEmDel();
       offVoice();
       offThread();
+      offPresence();
     };
     // Subscribe ONCE per server (not per channel) - we use activeChannelIdRef for the latest channel
     // eslint-disable-next-line react-hooks/exhaustive-deps

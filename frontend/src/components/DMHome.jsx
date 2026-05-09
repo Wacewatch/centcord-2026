@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import api from "../lib/api";
+import { useWS } from "../lib/ws";
 import { initials, presenceColor, cn } from "../lib/utils";
 import { useMobile } from "../lib/mobile";
 import UserBar from "./UserBar";
@@ -11,6 +12,7 @@ import { toast } from "sonner";
 export default function DMHome() {
   const navigate = useNavigate();
   const { dmId } = useParams();
+  const ws = useWS();
   const { isMobile, drawerOpen, toggleDrawer, closeDrawer } = useMobile();
   const [dms, setDms] = useState([]);
   const [friends, setFriends] = useState([]);
@@ -24,6 +26,45 @@ export default function DMHome() {
   };
 
   useEffect(() => { loadDms(); loadFriends(); }, []);
+  
+  // Listen to WebSocket events for real-time updates
+  useEffect(() => {
+    if (!ws) return;
+    // New DM created - reload DM list
+    const offDmCreate = ws.subscribe("message.create", (m) => {
+      if (m.dm_id) loadDms(); // New message in a DM triggers reload to update last_message
+    });
+    // Friend request received
+    const offFriendRequest = ws.subscribe("friend.request", () => {
+      loadFriends();
+      toast.info("Nouvelle demande d'ami reçue");
+    });
+    // Friend status updated (accepted, declined, removed)
+    const offFriendUpdate = ws.subscribe("friend.update", () => {
+      loadFriends();
+    });
+    // Presence updates (online/offline status)
+    const offPresence = ws.subscribe("presence.update", (data) => {
+      // Update DM list with new presence
+      setDms(prev => prev.map(dm => 
+        dm.other?.user_id === data.user_id 
+          ? { ...dm, other: { ...dm.other, status: data.status, custom_status: data.custom_status } }
+          : dm
+      ));
+      // Update friends list with new presence
+      setFriends(prev => prev.map(f =>
+        f.user?.user_id === data.user_id
+          ? { ...f, user: { ...f.user, status: data.status, custom_status: data.custom_status } }
+          : f
+      ));
+    });
+    return () => { 
+      offDmCreate(); 
+      offFriendRequest(); 
+      offFriendUpdate(); 
+      offPresence(); 
+    };
+  }, [ws]);
 
   const startDM = async (uid) => {
     try {
