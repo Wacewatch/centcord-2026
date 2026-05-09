@@ -10,7 +10,7 @@ import sys
 from typing import Optional
 
 # Backend URL from frontend/.env
-BASE_URL = "https://room-delete-issue.preview.emergentagent.com/api"
+BASE_URL = "https://voice-chat-debug-3.preview.emergentagent.com/api"
 
 # Admin credentials from test_credentials.md
 ADMIN_EMAIL = "admin@centcord.app"

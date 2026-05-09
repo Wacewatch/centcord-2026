@@ -9,7 +9,7 @@ import uuid
 import requests
 import pytest
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://room-delete-issue.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://voice-chat-debug-3.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 ADMIN_EMAIL = "admin@centcord.app"
 ADMIN_PASSWORD = "CentCordAdmin!2026"

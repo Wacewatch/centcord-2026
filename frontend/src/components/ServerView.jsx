@@ -115,7 +115,7 @@ export default function ServerView({ servers, reload }) {
   // Clear messages immediately on channel switch to avoid bleeding old channel content into the new view
   useEffect(() => {
     setMessages([]);
-    if (channel?.channel_id && channel.type === "text") {
+    if (channel?.channel_id && (channel.type === "text" || channel.type === "announcement" || channel.type === "forum")) {
       loadMessages(channel.channel_id);
       markRead(channel.channel_id);
     }
