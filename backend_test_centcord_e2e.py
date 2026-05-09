@@ -10,7 +10,7 @@ import time
 from typing import Optional
 
 # Configuration
-BACKEND_URL = "https://voice-chat-debug-3.preview.emergentagent.com/api"
+BACKEND_URL = "https://self-hosted-discord.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@centcord.app"
 ADMIN_PASSWORD = "CentCordAdmin!2026"
 

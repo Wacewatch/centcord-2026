@@ -1713,7 +1713,7 @@ agent_communication:
         CREDENTIALS UTILISÉS:
         - Email: admin@centcord.app
         - Password: CentCordAdmin!2026
-        - Backend URL: https://voice-chat-debug-3.preview.emergentagent.com/api
+        - Backend URL: https://self-hosted-discord.preview.emergentagent.com/api
         
         NO CRITICAL ISSUES FOUND. Backend CentCord entièrement fonctionnel et prêt pour production.
 

@@ -8,7 +8,7 @@ import sys
 import json
 
 # Configuration
-BASE_URL = "https://voice-chat-debug-3.preview.emergentagent.com/api"
+BASE_URL = "https://self-hosted-discord.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@centcord.app"
 ADMIN_PASSWORD = "CentCordAdmin!2026"
 
