@@ -106,11 +106,31 @@ export default function DMView() {
   const [replyTo, setReplyTo] = useState(null);
   
   const sendMessage = async (content, attachments, reply_to) => {
-    // E2E encryption with instant display
-    let payload = { content, attachments, reply_to };
-    const originalContent = content; // Save original for optimistic display
+    // Generate temporary ID for optimistic message
+    const tempId = `temp_${Date.now()}_${Math.random()}`;
+    const originalContent = content;
     
-    // Try to encrypt if keys are available
+    // 1. Add optimistic message FIRST with temp ID
+    const optimisticMsg = {
+      message_id: tempId,
+      dm_id: dmId,
+      content: originalContent,
+      author: { 
+        display_name: user?.display_name, 
+        user_id: user?.user_id, 
+        avatar_url: user?.avatar_url 
+      },
+      attachments: attachments || [],
+      reply_to,
+      reactions: [],
+      created_at: new Date().toISOString(),
+      _optimistic: true
+    };
+    
+    setMessages((prev) => [...prev, optimisticMsg]);
+    
+    // 2. Prepare payload with encryption
+    let payload = { content, attachments, reply_to };
     let theirPub = null;
     try { 
       theirPub = other?.public_key ? JSON.parse(other.public_key) : null; 
@@ -124,34 +144,26 @@ export default function DMView() {
         }
       } catch (e) {
         console.error("Encryption failed:", e);
-        // Continue with unencrypted message if encryption fails
       }
     }
     
+    // 3. Send to server
     try {
       const { data } = await api.post(`/dms/${dmId}/messages`, payload);
       
-      // Optimistically display the message DECRYPTED immediately
-      if (data && data.message_id) {
-        const messageToAdd = {
-          ...data,
-          content: originalContent, // Display original content (before encryption)
-          author: data.author || { 
-            display_name: user?.display_name, 
-            user_id: user?.user_id, 
-            avatar_url: user?.avatar_url 
-          },
-          _optimistic: true // Mark as optimistic
-        };
-        setMessages((prev) => {
-          if (prev.some((m) => m.message_id === data.message_id)) return prev;
-          return [...prev, messageToAdd];
-        });
-      }
-    }
-    catch (e) { 
+      // 4. Replace optimistic message with real one
+      setMessages((prev) => 
+        prev.map((m) => 
+          m.message_id === tempId 
+            ? { ...data, content: originalContent, author: data.author || optimisticMsg.author }
+            : m
+        )
+      );
+    } catch (e) { 
       console.error("Failed to send DM:", e);
-      toast.error("Échec de l'envoi"); 
+      toast.error("Échec de l'envoi");
+      // Remove optimistic message on failure
+      setMessages((prev) => prev.filter((m) => m.message_id !== tempId));
     }
     setReplyTo(null);
   };
