@@ -156,13 +156,21 @@ export default function DMView() {
       const { data } = await api.post(`/dms/${dmId}/messages`, payload);
       // Optimistically append the message (with deduplication against WS event)
       if (data && data.message_id) {
+        // Ensure the message has all required fields for display
+        const messageToAdd = {
+          ...data,
+          author: data.author || { display_name: user?.display_name, user_id: user?.user_id, avatar_url: user?.avatar_url }
+        };
         setMessages((prev) => {
           if (prev.some((m) => m.message_id === data.message_id)) return prev;
-          return [...prev, data];
+          return [...prev, messageToAdd];
         });
       }
     }
-    catch (e) { toast.error("Échec de l'envoi"); }
+    catch (e) { 
+      console.error("Failed to send DM:", e);
+      toast.error("Échec de l'envoi"); 
+    }
     setReplyTo(null);
   };
 
