@@ -68,7 +68,11 @@ export default function DMView() {
     const offCreate = ws.subscribe("message.create", async (m) => {
       if (m.dm_id !== dmId) return;
       const dec = await decryptOne(m);
-      setMessages((prev) => [...prev, dec]);
+      setMessages((prev) => {
+        // Avoid duplicates (e.g., if already added optimistically)
+        if (prev.some((x) => x.message_id === dec.message_id)) return prev;
+        return [...prev, dec];
+      });
     });
     const offUpdate = ws.subscribe("message.update", (d) => {
       setMessages((prev) => prev.map((m) => m.message_id === d.message_id ? { ...m, content: d.content, edited_at: d.edited_at } : m));
@@ -94,7 +98,16 @@ export default function DMView() {
         payload = { content: enc.content, nonce: enc.nonce, attachments, reply_to };
       }
     }
-    try { await api.post(`/dms/${dmId}/messages`, payload); }
+    try {
+      const { data } = await api.post(`/dms/${dmId}/messages`, payload);
+      // Optimistically append the message (with deduplication against WS event)
+      if (data && data.message_id) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.message_id === data.message_id)) return prev;
+          return [...prev, data];
+        });
+      }
+    }
     catch (e) { toast.error("Échec de l'envoi"); }
     setReplyTo(null);
   };

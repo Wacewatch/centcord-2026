@@ -26,13 +26,28 @@ export default function ThreadPanel({ thread, parentMessage, onClose }) {
   useEffect(() => {
     if (!ws) return;
     const off = ws.subscribe("thread.message", (m) => {
-      if (m.thread_id === thread.thread_id) setMessages((prev) => [...prev, m]);
+      if (m.thread_id === thread.thread_id) {
+        setMessages((prev) => {
+          // Avoid duplicates
+          if (prev.some((x) => x.message_id === m.message_id)) return prev;
+          return [...prev, m];
+        });
+      }
     });
     return () => off();
   }, [ws, thread.thread_id]);
 
   const send = async (content, attachments) => {
-    try { await api.post(`/threads/${thread.thread_id}/messages`, { content, attachments }); }
+    try {
+      const { data } = await api.post(`/threads/${thread.thread_id}/messages`, { content, attachments });
+      // Optimistically append the message
+      if (data && data.message_id) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.message_id === data.message_id)) return prev;
+          return [...prev, data];
+        });
+      }
+    }
     catch (_) { toast.error("Échec de l'envoi"); }
   };
 
