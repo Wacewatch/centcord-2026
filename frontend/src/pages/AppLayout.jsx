@@ -24,6 +24,13 @@ function AppShell() {
   const [openCreate, setOpenCreate] = useState(false);
   const [openJoin, setOpenJoin] = useState(false);
 
+  // Lock body scroll only when inside the chat shell so other pages (landing,
+  // /auth, /legal) can scroll normally.
+  useEffect(() => {
+    document.body.classList.add("cc-app-locked");
+    return () => document.body.classList.remove("cc-app-locked");
+  }, []);
+
   const loadServers = useCallback(async () => {
     try {
       const { data } = await api.get("/servers");
