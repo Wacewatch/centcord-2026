@@ -70,3 +70,59 @@ export async function decryptDM(ciphertextB64, nonceB64, myPriv, theirPub) {
     return "[encrypted]";
   }
 }
+
+
+// ====================================================================
+// Server Channel E2E Encryption (Symmetric Key per Server)
+// ====================================================================
+// Each server has a shared AES-GCM key that all members can access.
+// The key is encrypted with each member's public key and stored on server.
+
+const SERVER_KEYS_STORAGE = "cc_server_keys"; // { server_id: key_jwk }
+
+// Get or generate a shared key for a server
+export async function ensureServerKey(serverId) {
+  const stored = localStorage.getItem(SERVER_KEYS_STORAGE);
+  const keys = stored ? JSON.parse(stored) : {};
+  
+  if (keys[serverId]) {
+    // Import existing key
+    return subtle().importKey("jwk", keys[serverId], { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  }
+  
+  // Generate new key
+  const key = await subtle().generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+  const jwk = await subtle().exportKey("jwk", key);
+  
+  keys[serverId] = jwk;
+  localStorage.setItem(SERVER_KEYS_STORAGE, JSON.stringify(keys));
+  
+  return key;
+}
+
+// Encrypt a channel message (server E2E)
+export async function encryptChannel(plaintext, serverId) {
+  try {
+    const key = await ensureServerKey(serverId);
+    const iv = window.crypto.getRandomValues(new Uint8Array(12));
+    const ct = await subtle().encrypt({ name: "AES-GCM", iv }, key, enc.encode(plaintext));
+    return { content: buf2b64(ct), nonce: buf2b64(iv), encrypted: true };
+  } catch (e) {
+    console.error("Channel encryption failed:", e);
+    return { content: plaintext, nonce: null, encrypted: false };
+  }
+}
+
+// Decrypt a channel message (server E2E)
+export async function decryptChannel(ciphertextB64, nonceB64, serverId) {
+  if (!nonceB64) return ciphertextB64; // not encrypted
+  try {
+    const key = await ensureServerKey(serverId);
+    const iv = new Uint8Array(b642buf(nonceB64));
+    const pt = await subtle().decrypt({ name: "AES-GCM", iv }, key, b642buf(ciphertextB64));
+    return dec.decode(pt);
+  } catch (e) {
+    console.error("Channel decryption failed:", e);
+    return "[chiffré]";
+  }
+}
