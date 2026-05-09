@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import api from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -7,7 +7,8 @@ import { initials, presenceColor } from "../lib/utils";
 import UserBar from "./UserBar";
 import MessageList from "./MessageList";
 import MessageComposer from "./MessageComposer";
-import { Search, ArrowLeft } from "lucide-react";
+import { Lock, Search, ArrowLeft } from "lucide-react";
+import { ensureKeyPair, encryptDM, decryptDM } from "../lib/crypto";
 import { toast } from "sonner";
 
 export default function DMView() {
@@ -19,6 +20,21 @@ export default function DMView() {
   const [other, setOther] = useState(null);
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
+  const myKeysRef = useRef(null);
+
+  // Decrypt one message helper
+  const decryptOne = useCallback(async (m) => {
+    if (!m.encrypted || !m.nonce) return m;
+    if (!other?.public_key || !myKeysRef.current?.priv) return m;
+    try {
+      const pk = JSON.parse(other.public_key);
+      const text = await decryptDM(m.content, m.nonce, myKeysRef.current.priv, pk);
+      return { ...m, content: text, _decrypted: true };
+    } catch (e) {
+      console.error("Decrypt failed:", e);
+      return m; // Return as-is if decrypt fails
+    }
+  }, [other]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -28,27 +44,51 @@ export default function DMView() {
       if (!found) { navigate("/app/me"); return; }
       setDm(found); setOther(found.other);
       
-      // Fetch the other's latest profile
+      // Ensure my keypair, publish public key if missing
+      const kp = await ensureKeyPair();
+      myKeysRef.current = kp;
+      if (!user?.public_key) {
+        try { 
+          await api.patch("/users/me", { public_key: JSON.stringify(kp.pub) }); 
+          await refreshUser(); 
+        } catch (_) {}
+      }
+      
+      // Fetch the other's latest profile (with public_key)
       const otherFresh = (await api.get(`/users/${found.other.user_id}`)).data;
       setOther(otherFresh);
+      
       const { data } = await api.get(`/dms/${dmId}/messages?limit=50`);
-      // NO E2E decryption - messages are plain text
-      setMessages(data);
-    } catch (e) { toast.error("Échec du chargement du MP"); }
+      // Decrypt all messages with E2E
+      const decrypted = await Promise.all(data.map(async (m) => {
+        if (!m.encrypted) return m;
+        try {
+          const pk = otherFresh.public_key ? JSON.parse(otherFresh.public_key) : null;
+          if (!pk) return m;
+          const t = await decryptDM(m.content, m.nonce, kp.priv, pk);
+          return { ...m, content: t, _decrypted: true };
+        } catch (_) { return m; }
+      }));
+      setMessages(decrypted);
+    } catch (e) { 
+      console.error("Load DM error:", e);
+      toast.error("Échec du chargement du MP"); 
+    }
     finally { setLoading(false); }
-  }, [dmId, navigate]);
+  }, [dmId, navigate, user, refreshUser]);
 
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
     if (!ws) return;
-    const offCreate = ws.subscribe("message.create", (m) => {
+    const offCreate = ws.subscribe("message.create", async (m) => {
       if (m.dm_id !== dmId) return;
-      // NO decryption needed
+      // Decrypt message if encrypted (E2E)
+      const dec = await decryptOne(m);
       setMessages((prev) => {
         // Avoid duplicates (e.g., if already added optimistically)
-        if (prev.some((x) => x.message_id === m.message_id)) return prev;
-        return [...prev, m];
+        if (prev.some((x) => x.message_id === dec.message_id)) return prev;
+        return [...prev, dec];
       });
     });
     const offUpdate = ws.subscribe("message.update", (d) => {
@@ -60,24 +100,48 @@ export default function DMView() {
     const offRx = ws.subscribe("message.reaction", (d) => {
       setMessages((prev) => prev.map((m) => m.message_id === d.message_id ? { ...m, reactions: d.reactions } : m));
     });
-    // Call system removed
     return () => { offCreate(); offUpdate(); offDel(); offRx(); };
-  }, [ws, dmId]);
+  }, [ws, dmId, decryptOne]);
 
   const [replyTo, setReplyTo] = useState(null);
   
   const sendMessage = async (content, attachments, reply_to) => {
-    // Simplified: NO E2E encryption for now
-    const payload = { content, attachments, reply_to };
+    // E2E encryption with instant display
+    let payload = { content, attachments, reply_to };
+    const originalContent = content; // Save original for optimistic display
+    
+    // Try to encrypt if keys are available
+    let theirPub = null;
+    try { 
+      theirPub = other?.public_key ? JSON.parse(other.public_key) : null; 
+    } catch (_) {}
+    
+    if (theirPub && myKeysRef.current?.priv) {
+      try {
+        const enc = await encryptDM(content, myKeysRef.current.priv, theirPub);
+        if (enc.nonce) {
+          payload = { content: enc.content, nonce: enc.nonce, attachments, reply_to };
+        }
+      } catch (e) {
+        console.error("Encryption failed:", e);
+        // Continue with unencrypted message if encryption fails
+      }
+    }
     
     try {
       const { data } = await api.post(`/dms/${dmId}/messages`, payload);
-      // Optimistically append the message (with deduplication against WS event)
+      
+      // Optimistically display the message DECRYPTED immediately
       if (data && data.message_id) {
-        // Ensure the message has all required fields for display
         const messageToAdd = {
           ...data,
-          author: data.author || { display_name: user?.display_name, user_id: user?.user_id, avatar_url: user?.avatar_url }
+          content: originalContent, // Display original content (before encryption)
+          author: data.author || { 
+            display_name: user?.display_name, 
+            user_id: user?.user_id, 
+            avatar_url: user?.avatar_url 
+          },
+          _optimistic: true // Mark as optimistic
         };
         setMessages((prev) => {
           if (prev.some((m) => m.message_id === data.message_id)) return prev;
@@ -126,7 +190,7 @@ export default function DMView() {
         ) : (
           <>
             <MessageList messages={messages} currentUser={user} onReact={(id, e) => api.post(`/messages/${id}/reactions`, { emoji: e })} onReply={(m) => setReplyTo(m)} />
-            <MessageComposer placeholder={`Message à ${other?.display_name || ""}`} onSend={sendMessage} testIdPrefix="dm" replyTo={replyTo} onCancelReply={() => setReplyTo(null)} />
+            <MessageComposer placeholder={`Message privé (E2E chiffré)`} onSend={sendMessage} testIdPrefix="dm" replyTo={replyTo} onCancelReply={() => setReplyTo(null)} />
           </>
         )}
       </div>
