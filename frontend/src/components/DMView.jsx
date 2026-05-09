@@ -11,6 +11,7 @@ import { Lock, Phone, Video, Search, ArrowLeft } from "lucide-react";
 import { ensureKeyPair, encryptDM, decryptDM } from "../lib/crypto";
 import { toast } from "sonner";
 import DMCall from "./DMCall";
+import IncomingCallNotification from "./IncomingCallNotification";
 
 export default function DMView() {
   const { dmId } = useParams();
@@ -22,6 +23,7 @@ export default function DMView() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const myKeysRef = useRef(null);
+  const [incomingCall, setIncomingCall] = useState(null); // { from: user_obj, withVideo: bool }
 
   const decryptOne = useCallback(async (m) => {
     if (!m.encrypted || !m.nonce) return m;
@@ -83,11 +85,63 @@ export default function DMView() {
     const offRx = ws.subscribe("message.reaction", (d) => {
       setMessages((prev) => prev.map((m) => m.message_id === d.message_id ? { ...m, reactions: d.reactions } : m));
     });
-    return () => { offCreate(); offUpdate(); offDel(); offRx(); };
+    // Listen for incoming call requests via voice.signal
+    const offVoiceSignal = ws.subscribe("voice.signal", (payload) => {
+      const { from, event, data } = payload || {};
+      if (!from || !event) return;
+      
+      if (event === "call-request" && data?.dm_id === dmId) {
+        // Fetch the caller's user info
+        api.get(`/users/${from}`).then(({ data: caller }) => {
+          setIncomingCall({ from: caller, withVideo: data.with_video });
+        }).catch(() => {
+          // Fallback if we can't fetch user info
+          setIncomingCall({ from: { user_id: from, display_name: "Utilisateur" }, withVideo: data.with_video });
+        });
+      } else if (event === "call-cancel" && data?.dm_id === dmId) {
+        setIncomingCall(null);
+        toast.info("L'appel a été annulé");
+      }
+    });
+    return () => { offCreate(); offUpdate(); offDel(); offRx(); offVoiceSignal(); };
   }, [ws, dmId, decryptOne]);
 
   const [replyTo, setReplyTo] = useState(null);
   const [callMode, setCallMode] = useState(null); // null | 'audio' | 'video'
+  
+  // Initiate a call: send call.request notification first
+  const initiateCall = async (mode) => {
+    try {
+      await api.post("/voice/signal", {
+        to: other.user_id,
+        event: "call-request",
+        data: { dm_id: dmId, with_video: mode === 'video' }
+      });
+      setCallMode(mode);
+    } catch (e) {
+      toast.error("Impossible de démarrer l'appel");
+    }
+  };
+  
+  // Accept incoming call
+  const acceptCall = () => {
+    setCallMode(incomingCall.withVideo ? 'video' : 'audio');
+    setIncomingCall(null);
+  };
+  
+  // Decline incoming call
+  const declineCall = async () => {
+    try {
+      await api.post("/voice/signal", {
+        to: incomingCall.from.user_id,
+        event: "call-declined",
+        data: { dm_id: dmId }
+      });
+    } catch (_) {}
+    setIncomingCall(null);
+    toast.info("Appel refusé");
+  };
+  
   const sendMessage = async (content, attachments, reply_to) => {
     let payload = { content, attachments, reply_to };
     let theirPub = null;
@@ -136,8 +190,8 @@ export default function DMView() {
             </span>
           </div>
           <div className="ml-auto flex items-center gap-1">
-            <button onClick={() => setCallMode('audio')} data-testid="dm-call" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Appel audio"><Phone className="w-4 h-4" /></button>
-            <button onClick={() => setCallMode('video')} data-testid="dm-video" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Appel vidéo"><Video className="w-4 h-4" /></button>
+            <button onClick={() => initiateCall('audio')} data-testid="dm-call" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Appel audio"><Phone className="w-4 h-4" /></button>
+            <button onClick={() => initiateCall('video')} data-testid="dm-video" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Appel vidéo"><Video className="w-4 h-4" /></button>
             <button data-testid="dm-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Rechercher"><Search className="w-4 h-4" /></button>
           </div>
         </header>
@@ -151,6 +205,16 @@ export default function DMView() {
           </>
         )}
       </div>
+      {/* Incoming call notification */}
+      {incomingCall && (
+        <IncomingCallNotification
+          caller={incomingCall.from}
+          withVideo={incomingCall.withVideo}
+          onAccept={acceptCall}
+          onDecline={declineCall}
+        />
+      )}
+      {/* Active call */}
       {callMode && other && <DMCall other={other} withVideo={callMode === 'video'} onClose={() => setCallMode(null)} />}
     </main>
   );

@@ -106,6 +106,9 @@ export default function DMCall({ other, withVideo = false, onClose }) {
           if (data.candidate) try { await pc.addIceCandidate(data.candidate); } catch (_) {}
         } else if (event === "leave") {
           onClose?.();
+        } else if (event === "call-declined") {
+          toast.info("L'appel a été refusé");
+          onClose?.();
         }
       } catch (e) { console.error("dm signal err", e); }
     });

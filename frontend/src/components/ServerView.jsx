@@ -411,13 +411,20 @@ export default function ServerView({ servers, reload }) {
           isMobile && !drawerOpen ? "-translate-x-[calc(100%+5rem)]" : "translate-x-0"
         )}
       >
-        <button data-testid="server-header" onClick={() => setOpenSettings(true)} className="h-12 border-b border-cc-border px-4 flex items-center justify-between hover:bg-cc-surface2 transition-colors">
-          <span className="font-display font-extrabold uppercase tracking-tighter text-sm truncate">{server.name}</span>
-          <div className="flex items-center gap-1 shrink-0">
-            <Plus onClick={(e) => { e.stopPropagation(); createChannel(null); }} className="w-4 h-4 text-cc-muted hover:text-cc-accent" />
-            <ChevronDown className="w-4 h-4 text-cc-muted" />
+        {/* Settings accessible only to admins */}
+        {(((server?.my_perms || 0) & (1 << 4)) || ((server?.my_perms || 0) & (1 << 31))) ? (
+          <button data-testid="server-header" onClick={() => setOpenSettings(true)} className="h-12 border-b border-cc-border px-4 flex items-center justify-between hover:bg-cc-surface2 transition-colors">
+            <span className="font-display font-extrabold uppercase tracking-tighter text-sm truncate">{server.name}</span>
+            <div className="flex items-center gap-1 shrink-0">
+              <Plus onClick={(e) => { e.stopPropagation(); createChannel(null); }} className="w-4 h-4 text-cc-muted hover:text-cc-accent" />
+              <ChevronDown className="w-4 h-4 text-cc-muted" />
+            </div>
+          </button>
+        ) : (
+          <div className="h-12 border-b border-cc-border px-4 flex items-center justify-between">
+            <span className="font-display font-extrabold uppercase tracking-tighter text-sm truncate">{server.name}</span>
           </div>
-        </button>
+        )}
         <div className="flex-1 overflow-y-auto px-2 py-3 space-y-3">
           {cats.map((cat) => {
             const list = channelsByCat[cat.category_id] || [];
@@ -502,7 +509,10 @@ export default function ServerView({ servers, reload }) {
             <button data-testid="header-toggle-members" onClick={() => setShowMembers(!showMembers)} className={cn("p-2 hover:bg-cc-surface2 transition-colors", showMembers ? "text-cc-text" : "text-cc-subtext")} title="Membres"><Users className="w-4 h-4" /></button>
             <button onClick={() => setOpenSearch(true)} data-testid="header-search" className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Rechercher"><Search className="w-4 h-4" /></button>
             <NotificationsPanel />
-            <button data-testid="header-settings" onClick={() => setOpenSettings(true)} className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Paramètres"><Settings className="w-4 h-4" /></button>
+            {/* Settings button visible only to admins (PERM_MANAGE_SERVER or PERM_ADMINISTRATOR) */}
+            {(((server?.my_perms || 0) & (1 << 4)) || ((server?.my_perms || 0) & (1 << 31))) && (
+              <button data-testid="header-settings" onClick={() => setOpenSettings(true)} className="p-2 hover:bg-cc-surface2 text-cc-subtext hover:text-cc-text" title="Paramètres"><Settings className="w-4 h-4" /></button>
+            )}
           </div>
         </header>
         {channel?.type === "voice" ? (
